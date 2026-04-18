@@ -21,7 +21,7 @@ def get_config():
             "modules": {
                 "link_filter": {"enabled": "False", "chans": [], "roles": []},
                 "mod": {"enabled": "True", "roles": []},
-                "help": {"enabled": "True", "aliases": "help,info", "text": "LavaBot Online!"}
+                "help": {"enabled": "True", "aliases": "help,info", "text": "Wir sind bald Fertig!"}
             }
         }
         config_col.insert_one(default)
@@ -36,7 +36,6 @@ def get_prefix(bot, message):
 
 bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
 
-# 1. LINK FILTER & DYNAMIC HELP LOGIC
 @bot.event
 async def on_message(message):
     if message.author == bot.user: return
@@ -44,29 +43,28 @@ async def on_message(message):
     conf = get_config()
     prefix = conf.get("prefix", "!")
     
-    # Link Filter
+    # Link Filter Logik
     lf = conf['modules'].get('link_filter', {})
     if lf.get("enabled") == "True" and "http" in message.content:
-        # Falls Kanäle definiert sind, nur dort filtern
         if not lf.get("chans") or str(message.channel.id) in lf["chans"]:
             user_roles = [str(r.id) for r in message.author.roles]
             if not any(rid in lf.get("roles", []) for rid in user_roles) and not message.author.guild_permissions.administrator:
                 await message.delete()
                 return
 
-    # Dynamic Help Aliases
+    # Dynamic Help Aliases Fix
     hp = conf['modules'].get('help', {})
     if hp.get("enabled") == "True":
         aliases = [a.strip().lower() for a in hp.get("aliases", "help").split(",")]
         content = message.content.lower()
         for a in aliases:
             if content == f"{prefix}{a}":
-                await message.channel.send(hp.get("text", "Hilfe-Modul aktiv."))
+                await message.channel.send(hp.get("text", "LavaBot Online!"))
                 return
 
     await bot.process_commands(message)
 
-# 2. MODERATION COMMANDS (KICK, BAN, TIMEOUT)
+# --- MODERATION COMMANDS ---
 def is_mod():
     async def predicate(ctx):
         conf = get_config()
@@ -94,35 +92,29 @@ async def timeout(ctx, member: discord.Member, minutes: int, *, reason=None):
     await member.timeout(duration, reason=reason)
     await ctx.send(f"⏳ {member.name} für {minutes}m im Timeout.")
 
-# --- WEB UI (FIXED LAYOUT) ---
+# --- WEB UI (STRICT SEPARATION) ---
 app = Flask(__name__)
-app.secret_key = "lava_final_v6"
+app.secret_key = "lava_elite_final_v7"
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Lava Client</title>
+    <title>Lava Client 🌋</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         :root { --bg: #060606; --side: #0b0b0b; --card: #121212; --accent: #ff3333; --border: #1e1e1e; --text: #f0f0f0; }
         body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; margin: 0; display: flex; height: 100vh; overflow: hidden; }
-        
         .sidebar { width: 240px; background: var(--side); border-right: 1px solid var(--border); padding: 25px; flex-shrink: 0; }
-        .nav-btn { width: 100%; padding: 14px; background: none; border: none; color: #666; text-align: left; font-size: 15px; cursor: pointer; border-radius: 8px; margin-bottom: 8px; }
+        .nav-btn { width: 100%; padding: 14px; background: none; border: none; color: #666; text-align: left; font-size: 15px; cursor: pointer; border-radius: 8px; margin-bottom: 8px; transition: 0.2s; }
         .nav-btn:hover, .nav-btn.active { background: #1a1a1a; color: var(--accent); font-weight: bold; }
-
         .main { flex: 1; padding: 40px; overflow-y: auto; }
         .content-section { display: none; }
         .content-section.active { display: block; }
-
         .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
-        .row { display: flex; align-items: center; gap: 12px; padding: 8px; border-bottom: 1px solid #1a1a1a; }
-        .row:last-child { border: none; }
-        
-        input[type="text"], textarea, select { width: 100%; padding: 10px; background: #000; border: 1px solid #222; color: white; border-radius: 5px; margin-top: 5px; }
-        .save-bar { position: fixed; bottom: 20px; right: 20px; }
-        .btn-save { background: var(--accent); color: white; border: none; padding: 15px 40px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 16px; }
+        .row { display: flex; align-items: center; gap: 12px; padding: 10px; border-bottom: 1px solid #1a1a1a; }
+        input[type="text"], textarea { width: 100%; padding: 12px; background: #000; border: 1px solid #222; color: white; border-radius: 5px; margin-top: 8px; }
+        .btn-save { background: var(--accent); color: white; border: none; padding: 16px 45px; border-radius: 8px; cursor: pointer; font-weight: bold; position: fixed; bottom: 30px; right: 30px; box-shadow: 0 4px 15px rgba(255, 51, 51, 0.3); }
     </style>
     <script>
         function tab(id, el) {
@@ -134,17 +126,10 @@ HTML_TEMPLATE = """
     </script>
 </head>
 <body>
-    {% if not session.user %}
-    <div style="margin: auto; width: 300px; background: var(--card); padding: 30px; border-radius: 12px; border: 1px solid var(--accent); text-align: center;">
-        <h2 style="color:var(--accent)">LAVA AUTH</h2>
-        <form method="POST"><input type="password" name="pw" placeholder="Key" style="text-align:center" required><br><br><button class="btn-save" style="width:100%">UNLOCK</button></form>
-    </div>
-    {% else %}
     <div class="sidebar">
-        <h2 style="color:var(--accent)">LAVA CLIENT 🌋</h2>
+        <h2 style="color:var(--accent); margin-bottom: 40px;">LAVA CLIENT 🌋</h2>
         <button class="nav-btn active" onclick="tab('dash', this)"><i class="fas fa-th-large"></i> Dashboard</button>
         <button class="nav-btn" onclick="tab('sett', this)"><i class="fas fa-sliders-h"></i> Settings</button>
-        <div style="margin-top: 50px; color: #333; font-size: 12px;">LOGGED IN AS {{ session.user }}</div>
     </div>
 
     <div class="main">
@@ -155,21 +140,26 @@ HTML_TEMPLATE = """
                 <h1>Dashboard</h1>
                 <div class="card">
                     <h3>Global Settings</h3>
-                    Prefix: <input type="text" name="prefix" value="{{ config.prefix }}">
-                    Status: <input type="text" name="status" value="{{ config.status }}">
-                </div>
-                <div class="card">
-                    <h3>Help Commands</h3>
-                    Aliases (z.B. help, info): <input type="text" name="h_aliases" value="{{ config.modules.help.aliases }}">
-                    Antwort-Text: <textarea name="h_text" rows="4">{{ config.modules.help.text }}</textarea>
+                    <label>Bot Prefix:</label>
+                    <input type="text" name="prefix" value="{{ config.prefix }}">
+                    <br><br>
+                    <label>Bot Status:</label>
+                    <input type="text" name="status" value="{{ config.status }}">
                 </div>
             </div>
 
             <div id="sett" class="content-section">
                 <h1>Settings</h1>
+                
                 <div class="card">
-                    <h3>Link Filter (Whitelisted Channels)</h3>
-                    <div style="max-height: 200px; overflow-y: auto;">
+                    <h3>Help Module Configuration</h3>
+                    Aliases (z.B. help, info): <input type="text" name="h_aliases" value="{{ config.modules.help.aliases }}">
+                    Antwort-Text: <textarea name="h_text" rows="3">{{ config.modules.help.text }}</textarea>
+                </div>
+
+                <div class="card">
+                    <h3>Link Filter (Channels)</h3>
+                    <div style="max-height: 180px; overflow-y: auto; background: #080808; border-radius: 5px;">
                         {% for c in discord.channels %}
                         <div class="row">
                             <input type="checkbox" name="lf_chans" value="{{ c.id }}" {% if c.id|string in config.modules.link_filter.chans %}checked{% endif %}>
@@ -180,9 +170,8 @@ HTML_TEMPLATE = """
                 </div>
 
                 <div class="card">
-                    <h3>Moderation Roles</h3>
-                    <p style="font-size: 12px; color: #666;">Rollen, die !kick, !ban und !timeout nutzen dürfen:</p>
-                    <div style="max-height: 200px; overflow-y: auto;">
+                    <h3>Moderation Roles (Kick/Ban/Timeout)</h3>
+                    <div style="max-height: 180px; overflow-y: auto; background: #080808; border-radius: 5px;">
                         {% for r in discord.roles %}
                         <div class="row">
                             <input type="checkbox" name="mod_roles" value="{{ r.id }}" {% if r.id|string in config.modules.mod.roles %}checked{% endif %}>
@@ -193,10 +182,9 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <div class="save-bar"><button type="submit" class="btn-save">DEPLOY CHANGES</button></div>
+            <button type="submit" class="btn-save">DEPLOY CHANGES</button>
         </form>
     </div>
-    {% endif %}
 </body>
 </html>
 """
@@ -210,30 +198,20 @@ def index():
         "roles": [{"id": r.id, "name": r.name} for r in guild.roles if not r.managed and r.name != "@everyone"] if guild else []
     }
 
-    if request.method == "POST":
-        if "pw" in request.form and request.form.get("pw") == "10":
-            session['user'] = "ADMIN"
-            return redirect(url_for('index'))
-        
-        if request.form.get("action") == "save":
-            updates = {
-                "prefix": request.form.get("prefix"),
-                "status": request.form.get("status"),
-                "modules.help.aliases": request.form.get("h_aliases"),
-                "modules.help.text": request.form.get("h_text"),
-                "modules.link_filter.chans": request.form.getlist("lf_chans"),
-                "modules.mod.roles": request.form.getlist("mod_roles")
-            }
-            config_col.update_one({"id": "bot_config"}, {"$set": updates})
-            asyncio.run_coroutine_threadsafe(bot.change_presence(activity=discord.Game(name=updates['status'])), bot.loop)
-            return redirect(url_for('index'))
+    if request.method == "POST" and request.form.get("action") == "save":
+        updates = {
+            "prefix": request.form.get("prefix"),
+            "status": request.form.get("status"),
+            "modules.help.aliases": request.form.get("h_aliases"),
+            "modules.help.text": request.form.get("h_text"),
+            "modules.link_filter.chans": request.form.getlist("lf_chans"),
+            "modules.mod.roles": request.form.getlist("mod_roles")
+        }
+        config_col.update_one({"id": "bot_config"}, {"$set": updates})
+        asyncio.run_coroutine_threadsafe(bot.change_presence(activity=discord.Game(name=updates['status'])), bot.loop)
+        return redirect(url_for('index'))
 
     return render_template_string(HTML_TEMPLATE, config=conf, discord=discord_data)
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for('index'))
 
 def run(): app.run(host="0.0.0.0", port=10000)
 threading.Thread(target=run).start()
