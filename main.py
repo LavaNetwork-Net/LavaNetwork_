@@ -4,6 +4,8 @@ from flask import Flask, request, render_template_string
 import threading
 import os
 from pymongo import MongoClient
+import asyncio
+from datetime import timedelta
 
 # --- DATABASE SETUP ---
 MONGO_URI = os.environ.get('MONGO_URI')
@@ -16,12 +18,15 @@ def get_config():
     if not conf:
         default = {
             "id": "bot_config",
-            "module_info": "True",      # Info-Befehl an/aus
-            "module_welcome": "True",   # Willkommens-System an/aus
-            "module_antilink": "False", # Anti-Link Schutz an/aus
-            "info_text": "LavaNetwork Bot v3 - Premium System",
             "prefix": "!",
-            "welcome_msg": "Willkommen auf dem Server!"
+            "status_text": "LavaClient v4.0",
+            # Module Switches
+            "mod_enabled": "True",
+            "help_enabled": "True",
+            # Command Settings
+            "help_aliases": "help,list,commands,hilfe",
+            "help_text": "Hier sind alle Befehle: !info, !hallo, !ban, !kick",
+            "info_text": "LavaClient Premium System",
         }
         config_col.insert_one(default)
         return default
@@ -29,119 +34,136 @@ def get_config():
 
 # --- BOT LOGIC ---
 intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-@bot.command(name="info")
-async def info(ctx):
-    conf = get_config()
-    # PRÜFUNG: Ist das Modul aktiviert?
-    if conf.get("module_info") == "True":
-        embed = discord.Embed(title="System Info", description=conf['info_text'], color=0xff4d4d)
-        await ctx.send(embed=embed)
-    else:
-        # Wenn aus, reagiert der Bot einfach nicht oder gibt einen Hinweis
-        pass
-
+# Dynamischer Help-Befehl (reagiert auf konfigurierte Aliase)
 @bot.event
 async def on_message(message):
     if message.author == bot.user: return
-    
     conf = get_config()
-    # Anti-Link Modul Check
-    if conf.get("module_antilink") == "True":
-        if "http" in message.content:
-            await message.delete()
-            await message.channel.send(f"{message.author.mention}, Links sind hier deaktiviert!", delete_after=5)
-            return
+    prefix = conf.get("prefix", "!")
+    content = message.content.lower()
+
+    # Prüfung für Help-Aliase
+    if conf.get("help_enabled") == "True":
+        aliases = [a.strip() for a in conf.get("help_aliases", "help").split(",")]
+        for alias in aliases:
+            if content == f"{prefix}{alias.lower()}":
+                await message.channel.send(f"**{conf.get('help_text')}**")
+                return
 
     await bot.process_commands(message)
 
-# --- WEB PANEL (CONTROL CENTER) ---
+# --- MODERATION COMMANDS ---
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def kick(ctx, member: discord.Member, *, reason=None):
+    if get_config().get("mod_enabled") == "True":
+        await member.kick(reason=reason)
+        await ctx.send(f"✅ {member.display_name} wurde gekickt. Grund: {reason}")
+
+@bot.command()
+@commands.has_permissions(ban_members=True)
+async def ban(ctx, member: discord.Member, *, reason=None):
+    if get_config().get("mod_enabled") == "True":
+        await member.ban(reason=reason)
+        await ctx.send(f"🚫 {member.display_name} wurde gebannt. Grund: {reason}")
+
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def timeout(ctx, member: discord.Member, minutes: int, *, reason=None):
+    if get_config().get("mod_enabled") == "True":
+        duration = timedelta(minutes=minutes)
+        await member.timeout(duration, reason=reason)
+        await ctx.send(f"⏳ {member.display_name} ist im Timeout für {minutes} Minuten. Grund: {reason}")
+
+# --- WEB UI (ELITE DESIGN) ---
 app = Flask(__name__)
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>LavaBot Control Center</title>
+    <title>LavaClient Elite Panel</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        :root { --bg: #0f1011; --card: #1a1b1e; --accent: #ff4d4d; --text: #ffffff; }
-        body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; padding: 40px; }
-        .header { text-align: center; margin-bottom: 50px; }
-        .header h1 { color: var(--accent); letter-spacing: 3px; font-size: 32px; }
+        :root { --bg: #0a0b0d; --side: #111216; --card: #181a20; --accent: #ff4d4d; --text: #ffffff; }
+        body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; margin: 0; display: flex; height: 100vh; }
+        .sidebar { width: 260px; background: var(--side); padding: 30px 15px; border-right: 1px solid #222; }
+        .nav-item { padding: 12px 15px; border-radius: 10px; cursor: pointer; color: #888; display: flex; align-items: center; gap: 12px; margin-bottom: 5px; transition: 0.2s; text-decoration: none; }
+        .nav-item:hover, .nav-item.active { background: #1f2128; color: var(--accent); }
         
-        .module-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px; max-width: 1200px; margin: 0 auto; }
-        .module-card { background: var(--card); padding: 25px; border-radius: 15px; border: 1px solid #333; position: relative; }
-        
-        /* Toggle Switch Style */
-        .switch { position: absolute; top: 25px; right: 25px; display: inline-block; width: 50px; height: 26px; }
-        .switch input { opacity: 0; width: 0; height: 0; }
-        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #444; transition: .4s; border-radius: 34px; }
-        .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
-        input:checked + .slider { background-color: var(--accent); }
-        input:checked + .slider:before { transform: translateX(24px); }
+        .main { flex: 1; padding: 40px; overflow-y: auto; background: radial-gradient(circle at top right, #15161c, #0a0b0d); }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 25px; }
+        .glass-card { background: var(--card); border: 1px solid #282a32; border-radius: 15px; padding: 25px; }
+        .glass-card h3 { margin: 0 0 20px 0; color: var(--accent); border-bottom: 1px solid #222; padding-bottom: 10px; }
 
-        h3 { margin-top: 0; display: flex; align-items: center; gap: 10px; color: var(--accent); }
-        input[type="text"], textarea { width: 100%; padding: 12px; background: #0b0c10; border: 1px solid #444; color: white; border-radius: 8px; margin: 10px 0; box-sizing: border-box; }
-        .btn-save { background: var(--accent); color: white; border: none; padding: 15px; border-radius: 8px; width: 100%; font-weight: bold; cursor: pointer; margin-top: 20px; transition: 0.3s; }
-        .btn-save:hover { filter: brightness(1.2); }
-        
-        .status-badge { font-size: 12px; background: #222; padding: 4px 8px; border-radius: 4px; color: #888; }
+        input, textarea { width: 100%; padding: 12px; background: #0a0b0d; border: 1px solid #333; color: white; border-radius: 8px; margin: 10px 0; box-sizing: border-box; }
+        .switch-box { display: flex; justify-content: space-between; align-items: center; background: #111216; padding: 10px 15px; border-radius: 8px; margin-bottom: 15px; }
+        .btn-save { position: fixed; bottom: 30px; right: 30px; background: var(--accent); color: white; border: none; padding: 15px 35px; border-radius: 50px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 15px rgba(255, 77, 77, 0.3); }
+
+        /* Toggle */
+        .switch { position: relative; display: inline-block; width: 45px; height: 24px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #333; transition: .4s; border-radius: 34px; }
+        .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: var(--accent); }
+        input:checked + .slider:before { transform: translateX(21px); }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>LAVA BOT MODULES <i class="fas fa-microchip"></i></h1>
-        <p>Aktiviere oder deaktiviere Funktionen für deinen Server</p>
+    <div class="sidebar">
+        <h2 style="color:var(--accent); margin-bottom:40px;"><i class="fas fa-fire"></i> LavaClient</h2>
+        <a href="#" class="nav-item active"><i class="fas fa-hammer"></i> Moderation</a>
+        <a href="#" class="nav-item"><i class="fas fa-book"></i> Commands</a>
+        <a href="#" class="nav-item"><i class="fas fa-cog"></i> Core Settings</a>
     </div>
 
-    {% if not auth %}
-    <div style="max-width: 400px; margin: 0 auto; background: var(--card); padding: 30px; border-radius: 15px; text-align: center;">
-        <form method="POST"><input type="password" name="key" placeholder="Admin Key"><button class="btn-save">LOGIN</button></form>
+    <div class="main">
+        <h1>Hey Joshua! 👋</h1>
+        <form method="POST">
+            <input type="hidden" name="key" value="10">
+            <input type="hidden" name="save" value="true">
+            
+            <div class="grid">
+                <div class="glass-card">
+                    <h3><i class="fas fa-gavel"></i> Mod System</h3>
+                    <div class="switch-box">
+                        <span>Ban/Kick/Timeout Aktiv</span>
+                        <label class="switch">
+                            <input type="checkbox" name="mod_enabled" value="True" {% if config.mod_enabled == 'True' %}checked{% endif %}>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <p style="font-size: 12px; color: #666;">Befehle: <code>!kick @user</code>, <code>!ban @user</code>, <code>!timeout @user 10</code></p>
+                </div>
+
+                <div class="glass-card">
+                    <h3><i class="fas fa-terminal"></i> Help Command</h3>
+                    <div class="switch-box">
+                        <span>Modul Aktiv</span>
+                        <label class="switch">
+                            <input type="checkbox" name="help_enabled" value="True" {% if config.help_enabled == 'True' %}checked{% endif %}>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    Aliase (mit Komma trennen):
+                    <input type="text" name="help_aliases" value="{{ config.help_aliases }}" placeholder="help, list, info...">
+                    Antwort-Text:
+                    <textarea name="help_text" rows="3">{{ config.help_text }}</textarea>
+                </div>
+
+                <div class="glass-card">
+                    <h3><i class="fas fa-sliders"></i> Global Settings</h3>
+                    Prefix:
+                    <input type="text" name="prefix" value="{{ config.prefix }}">
+                    Bot Status:
+                    <input type="text" name="status_text" value="{{ config.status_text }}">
+                </div>
+            </div>
+            <button type="submit" class="btn-save">ÄNDERUNGEN SPEICHERN</button>
+        </form>
     </div>
-    {% else %}
-    <form method="POST">
-        <input type="hidden" name="key" value="10">
-        <input type="hidden" name="save" value="true">
-        
-        <div class="module-grid">
-            <div class="module-card">
-                <h3><i class="fas fa-info-circle"></i> Info-Befehl</h3>
-                <label class="switch">
-                    <input type="checkbox" name="module_info" value="True" {% if config.module_info == 'True' %}checked{% endif %}>
-                    <span class="slider"></span>
-                </label>
-                <p>Erlaubt Usern den Befehl <code>!info</code> zu nutzen.</p>
-                <input type="text" name="info_text" value="{{ config.info_text }}" placeholder="Info Text eingeben...">
-            </div>
-
-            <div class="module-card">
-                <h3><i class="fas fa-link-slash"></i> Anti-Link Schutz</h3>
-                <label class="switch">
-                    <input type="checkbox" name="module_antilink" value="True" {% if config.module_antilink == 'True' %}checked{% endif %}>
-                    <span class="slider"></span>
-                </label>
-                <p>Löscht automatisch alle Links von normalen Usern.</p>
-                <span class="status-badge">Automatischer Schutz</span>
-            </div>
-
-            <div class="module-card">
-                <h3><i class="fas fa-door-open"></i> Welcome System</h3>
-                <label class="switch">
-                    <input type="checkbox" name="module_welcome" value="True" {% if config.module_welcome == 'True' %}checked{% endif %}>
-                    <span class="slider"></span>
-                </label>
-                <p>Sendet eine Nachricht, wenn jemand beitritt.</p>
-                <textarea name="welcome_msg">{{ config.welcome_msg }}</textarea>
-            </div>
-        </div>
-
-        <div style="text-align: center; margin-top: 40px;">
-            <button type="submit" class="btn-save" style="max-width: 300px;">ÄNDERUNGEN SPEICHERN</button>
-        </div>
-    </form>
-    {% endif %}
 </body>
 </html>
 """
@@ -154,20 +176,20 @@ def index():
         if request.form.get("key") == "10":
             auth = True
             if request.form.get("save"):
-                # Wir setzen alle Checkboxen erst auf False (da nicht gesendete Checkboxen im Formular fehlen)
+                # Checkboxen Handling
                 new_data = {
-                    "module_info": "False",
-                    "module_welcome": "False",
-                    "module_antilink": "False",
-                    "info_text": request.form.get("info_text"),
-                    "welcome_msg": request.form.get("welcome_msg")
+                    "mod_enabled": "False",
+                    "help_enabled": "False",
+                    "help_aliases": request.form.get("help_aliases"),
+                    "help_text": request.form.get("help_text"),
+                    "prefix": request.form.get("prefix"),
+                    "status_text": request.form.get("status_text")
                 }
-                # Dann überschreiben wir sie mit "True", wenn sie im Formular vorhanden sind
                 for key in request.form:
-                    if key in new_data:
-                        new_data[key] = request.form[key]
+                    if key in new_data: new_data[key] = request.form[key]
                 
                 config_col.update_one({"id": "bot_config"}, {"$set": new_data})
+                asyncio.run_coroutine_threadsafe(bot.change_presence(activity=discord.Game(name=new_data['status_text'])), bot.loop)
                 conf = get_config()
     return render_template_string(HTML_TEMPLATE, auth=auth, config=conf)
 
