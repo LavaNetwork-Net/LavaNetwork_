@@ -1,13 +1,13 @@
 import discord
 from discord.ext import commands
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, session, redirect, url_for
 import threading
 import os
 from pymongo import MongoClient
 import asyncio
 from datetime import timedelta
 
-# --- DATABASE SETUP ---
+# --- DATABASE ---
 MONGO_URI = os.environ.get('MONGO_URI')
 client = MongoClient(MONGO_URI)
 db = client['lavabot_db']
@@ -19,179 +19,216 @@ def get_config():
         default = {
             "id": "bot_config",
             "prefix": "!",
-            "status_text": "LavaClient v4.0",
-            # Module Switches
-            "mod_enabled": "True",
-            "help_enabled": "True",
-            # Command Settings
-            "help_aliases": "help,list,commands,hilfe",
-            "help_text": "Hier sind alle Befehle: !info, !hallo, !ban, !kick",
-            "info_text": "LavaClient Premium System",
+            "status": "LavaClient Active",
+            "modules": {
+                "help": {"enabled": "True", "channels": [], "roles": []},
+                "link_filter": {"enabled": "False", "channels": [], "roles": []},
+                "mod": {"enabled": "True", "channels": [], "roles": []}
+            }
         }
         config_col.insert_one(default)
         return default
     return conf
 
-# --- BOT LOGIC ---
+# --- BOT ---
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-# Dynamischer Help-Befehl (reagiert auf konfigurierte Aliase)
+# Helper to check permissions
+def has_module_perms(ctx, module_name):
+    conf = get_config()
+    mod = conf['modules'].get(module_name, {})
+    if mod.get("enabled") != "True": return False
+    
+    # Check Channel
+    if mod.get("channels") and str(ctx.channel.id) not in mod["channels"]: return False
+    
+    # Check Roles (Admins always allowed)
+    if ctx.author.guild_permissions.administrator: return True
+    if mod.get("roles"):
+        user_role_ids = [str(r.id) for r in ctx.author.roles]
+        if not any(rid in mod["roles"] for rid in user_role_ids): return False
+    
+    return True
+
 @bot.event
 async def on_message(message):
     if message.author == bot.user: return
     conf = get_config()
-    prefix = conf.get("prefix", "!")
-    content = message.content.lower()
-
-    # Prüfung für Help-Aliase
-    if conf.get("help_enabled") == "True":
-        aliases = [a.strip() for a in conf.get("help_aliases", "help").split(",")]
-        for alias in aliases:
-            if content == f"{prefix}{alias.lower()}":
-                await message.channel.send(f"**{conf.get('help_text')}**")
+    
+    # Link Filter Logic
+    lf = conf['modules'].get('link_filter', {})
+    if lf.get("enabled") == "True" and "http" in message.content:
+        # Check if channel is restricted
+        if not lf.get("channels") or str(message.channel.id) in lf["channels"]:
+            if not message.author.guild_permissions.administrator:
+                await message.delete()
                 return
 
     await bot.process_commands(message)
 
-# --- MODERATION COMMANDS ---
-@bot.command()
-@commands.has_permissions(kick_members=True)
-async def kick(ctx, member: discord.Member, *, reason=None):
-    if get_config().get("mod_enabled") == "True":
-        await member.kick(reason=reason)
-        await ctx.send(f"✅ {member.display_name} wurde gekickt. Grund: {reason}")
-
-@bot.command()
-@commands.has_permissions(ban_members=True)
-async def ban(ctx, member: discord.Member, *, reason=None):
-    if get_config().get("mod_enabled") == "True":
-        await member.ban(reason=reason)
-        await ctx.send(f"🚫 {member.display_name} wurde gebannt. Grund: {reason}")
-
-@bot.command()
-@commands.has_permissions(moderate_members=True)
-async def timeout(ctx, member: discord.Member, minutes: int, *, reason=None):
-    if get_config().get("mod_enabled") == "True":
-        duration = timedelta(minutes=minutes)
-        await member.timeout(duration, reason=reason)
-        await ctx.send(f"⏳ {member.display_name} ist im Timeout für {minutes} Minuten. Grund: {reason}")
-
-# --- WEB UI (ELITE DESIGN) ---
+# --- WEB UI ---
 app = Flask(__name__)
+app.secret_key = "lava_secret_key"
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>LavaClient Elite Panel</title>
+    <title>LavaClient | Dashboard</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        :root { --bg: #0a0b0d; --side: #111216; --card: #181a20; --accent: #ff4d4d; --text: #ffffff; }
+        :root { --bg: #050505; --side: #0a0a0a; --card: #111111; --accent: #ff3e3e; --text: #ececec; }
         body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; margin: 0; display: flex; height: 100vh; }
-        .sidebar { width: 260px; background: var(--side); padding: 30px 15px; border-right: 1px solid #222; }
-        .nav-item { padding: 12px 15px; border-radius: 10px; cursor: pointer; color: #888; display: flex; align-items: center; gap: 12px; margin-bottom: 5px; transition: 0.2s; text-decoration: none; }
-        .nav-item:hover, .nav-item.active { background: #1f2128; color: var(--accent); }
         
-        .main { flex: 1; padding: 40px; overflow-y: auto; background: radial-gradient(circle at top right, #15161c, #0a0b0d); }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 25px; }
-        .glass-card { background: var(--card); border: 1px solid #282a32; border-radius: 15px; padding: 25px; }
-        .glass-card h3 { margin: 0 0 20px 0; color: var(--accent); border-bottom: 1px solid #222; padding-bottom: 10px; }
+        .sidebar { width: 240px; background: var(--side); border-right: 1px solid #1a1a1a; padding: 25px; }
+        .logo { font-size: 22px; font-weight: 900; color: var(--accent); margin-bottom: 40px; letter-spacing: 1px; }
+        
+        .main { flex: 1; padding: 40px; overflow-y: auto; }
+        .nav-link { display: block; padding: 12px; color: #666; text-decoration: none; border-radius: 8px; margin-bottom: 5px; transition: 0.2s; }
+        .nav-link:hover, .nav-link.active { background: #151515; color: white; }
 
-        input, textarea { width: 100%; padding: 12px; background: #0a0b0d; border: 1px solid #333; color: white; border-radius: 8px; margin: 10px 0; box-sizing: border-box; }
-        .switch-box { display: flex; justify-content: space-between; align-items: center; background: #111216; padding: 10px 15px; border-radius: 8px; margin-bottom: 15px; }
-        .btn-save { position: fixed; bottom: 30px; right: 30px; background: var(--accent); color: white; border: none; padding: 15px 35px; border-radius: 50px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 15px rgba(255, 77, 77, 0.3); }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 40px; }
+        .user-tag { background: #151515; padding: 8px 15px; border-radius: 50px; border: 1px solid #222; font-size: 14px; }
 
-        /* Toggle */
-        .switch { position: relative; display: inline-block; width: 45px; height: 24px; }
-        .switch input { opacity: 0; width: 0; height: 0; }
-        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #333; transition: .4s; border-radius: 34px; }
-        .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
-        input:checked + .slider { background-color: var(--accent); }
-        input:checked + .slider:before { transform: translateX(21px); }
+        .module-card { background: var(--card); border-radius: 12px; padding: 25px; margin-bottom: 25px; border: 1px solid #1a1a1a; position: relative; }
+        .module-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        
+        .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        label { display: block; font-size: 12px; color: #555; text-transform: uppercase; margin-bottom: 8px; font-weight: bold; }
+        
+        select, input, textarea { width: 100%; background: #080808; border: 1px solid #222; color: white; padding: 12px; border-radius: 6px; outline: none; }
+        select:focus, input:focus { border-color: var(--accent); }
+
+        .btn-save { background: var(--accent); color: white; border: none; padding: 12px 25px; border-radius: 6px; cursor: pointer; font-weight: bold; float: right; }
+        
+        /* Multi-select box style */
+        .select-box { height: 100px; overflow-y: auto; border: 1px solid #222; border-radius: 6px; padding: 5px; }
+        .select-box div { font-size: 13px; padding: 5px; display: flex; align-items: center; gap: 8px; }
+
+        .login-box { width: 350px; margin: 150px auto; background: var(--card); padding: 30px; border-radius: 12px; border: 1px solid #222; }
     </style>
 </head>
 <body>
+    {% if not session.user %}
+    <div class="login-box">
+        <h2 style="color:var(--accent)">System Auth</h2>
+        <form method="POST">
+            <input type="text" name="username" placeholder="Username" required><br>
+            <input type="password" name="key" placeholder="Access Key" required><br>
+            <button class="btn-save" style="float:none; width:100%">LOGIN</button>
+        </form>
+    </div>
+    {% else %}
     <div class="sidebar">
-        <h2 style="color:var(--accent); margin-bottom:40px;"><i class="fas fa-fire"></i> LavaClient</h2>
-        <a href="#" class="nav-item active"><i class="fas fa-hammer"></i> Moderation</a>
-        <a href="#" class="nav-item"><i class="fas fa-book"></i> Commands</a>
-        <a href="#" class="nav-item"><i class="fas fa-cog"></i> Core Settings</a>
+        <div class="logo">LAVA.NET</div>
+        <a href="#" class="nav-link active">Dashboard</a>
+        <a href="#" class="nav-link">Security</a>
+        <a href="#" class="nav-link">Logs</a>
     </div>
 
     <div class="main">
-        <h1>Hey Joshua! 👋</h1>
+        <div class="header">
+            <h1>Server Management</h1>
+            <div class="user-tag"><i class="fas fa-user"></i> {{ session.user }}</div>
+        </div>
+
         <form method="POST">
-            <input type="hidden" name="key" value="10">
-            <input type="hidden" name="save" value="true">
+            <input type="hidden" name="save_settings" value="true">
             
-            <div class="grid">
-                <div class="glass-card">
-                    <h3><i class="fas fa-gavel"></i> Mod System</h3>
-                    <div class="switch-box">
-                        <span>Ban/Kick/Timeout Aktiv</span>
-                        <label class="switch">
-                            <input type="checkbox" name="mod_enabled" value="True" {% if config.mod_enabled == 'True' %}checked{% endif %}>
-                            <span class="slider"></span>
-                        </label>
+            <div class="module-card">
+                <h3>Global Config</h3>
+                <div class="settings-grid">
+                    <div>
+                        <label>Prefix</label>
+                        <select name="prefix">
+                            <option value="!" {% if config.prefix == '!' %}selected{% endif %}>! (Exclamation)</option>
+                            <option value="." {% if config.prefix == '.' %}selected{% endif %}>. (Dot)</option>
+                            <option value="?" {% if config.prefix == '?' %}selected{% endif %}>? (Question)</option>
+                            <option value="/" {% if config.prefix == '/' %}selected{% endif %}>/ (Slash)</option>
+                        </select>
                     </div>
-                    <p style="font-size: 12px; color: #666;">Befehle: <code>!kick @user</code>, <code>!ban @user</code>, <code>!timeout @user 10</code></p>
-                </div>
-
-                <div class="glass-card">
-                    <h3><i class="fas fa-terminal"></i> Help Command</h3>
-                    <div class="switch-box">
-                        <span>Modul Aktiv</span>
-                        <label class="switch">
-                            <input type="checkbox" name="help_enabled" value="True" {% if config.help_enabled == 'True' %}checked{% endif %}>
-                            <span class="slider"></span>
-                        </label>
+                    <div>
+                        <label>Bot Status</label>
+                        <input type="text" name="status" value="{{ config.status }}">
                     </div>
-                    Aliase (mit Komma trennen):
-                    <input type="text" name="help_aliases" value="{{ config.help_aliases }}" placeholder="help, list, info...">
-                    Antwort-Text:
-                    <textarea name="help_text" rows="3">{{ config.help_text }}</textarea>
-                </div>
-
-                <div class="glass-card">
-                    <h3><i class="fas fa-sliders"></i> Global Settings</h3>
-                    Prefix:
-                    <input type="text" name="prefix" value="{{ config.prefix }}">
-                    Bot Status:
-                    <input type="text" name="status_text" value="{{ config.status_text }}">
                 </div>
             </div>
-            <button type="submit" class="btn-save">ÄNDERUNGEN SPEICHERN</button>
+
+            <div class="module-card">
+                <div class="module-header">
+                    <h3>Link Filter</h3>
+                    <select name="mod_lf_enabled" style="width: 100px;">
+                        <option value="True" {% if config.modules.link_filter.enabled == 'True' %}selected{% endif %}>ON</option>
+                        <option value="False" {% if config.modules.link_filter.enabled == 'False' %}selected{% endif %}>OFF</option>
+                    </select>
+                </div>
+                <div class="settings-grid">
+                    <div>
+                        <label>Allowed Channels</label>
+                        <div class="select-box">
+                            {% for chan in channels %}
+                            <div><input type="checkbox" name="lf_chans" value="{{ chan.id }}" {% if chan.id|string in config.modules.link_filter.channels %}checked{% endif %}> {{ chan.name }}</div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div>
+                        <label>Allowed Roles (Bypass)</label>
+                        <div class="select-box">
+                            {% for role in roles %}
+                            <div><input type="checkbox" name="lf_roles" value="{{ role.id }}" {% if role.id|string in config.modules.link_filter.roles %}checked{% endif %}> {{ role.name }}</div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                <button class="btn-save">Update Module</button>
+                <div style="clear:both"></div>
+            </div>
         </form>
     </div>
+    {% endif %}
 </body>
 </html>
 """
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    auth = False
     conf = get_config()
+    # Fetch real data from discord
+    guild = bot.guilds[0] if bot.guilds else None
+    channels = [{"id": c.id, "name": c.name} for c in guild.text_channels] if guild else []
+    roles = [{"id": r.id, "name": r.name} for r in guild.roles if not r.managed] if guild else []
+
     if request.method == "POST":
-        if request.form.get("key") == "10":
-            auth = True
-            if request.form.get("save"):
-                # Checkboxen Handling
-                new_data = {
-                    "mod_enabled": "False",
-                    "help_enabled": "False",
-                    "help_aliases": request.form.get("help_aliases"),
-                    "help_text": request.form.get("help_text"),
-                    "prefix": request.form.get("prefix"),
-                    "status_text": request.form.get("status_text")
-                }
-                for key in request.form:
-                    if key in new_data: new_data[key] = request.form[key]
-                
-                config_col.update_one({"id": "bot_config"}, {"$set": new_data})
-                asyncio.run_coroutine_threadsafe(bot.change_presence(activity=discord.Game(name=new_data['status_text'])), bot.loop)
-                conf = get_config()
-    return render_template_string(HTML_TEMPLATE, auth=auth, config=conf)
+        if "username" in request.form:
+            if request.form.get("key") == "10":
+                session['user'] = request.form.get("username")
+                return redirect(url_for('index'))
+        
+        if request.form.get("save_settings"):
+            new_prefix = request.form.get("prefix")
+            new_status = request.form.get("status")
+            
+            # Update DB logic for modules
+            lf_chans = request.form.getlist("lf_chans")
+            lf_roles = request.form.getlist("lf_roles")
+            lf_enabled = request.form.get("mod_lf_enabled")
+
+            update_dict = {
+                "prefix": new_prefix,
+                "status": new_status,
+                "modules.link_filter.enabled": lf_enabled,
+                "modules.link_filter.channels": lf_chans,
+                "modules.link_filter.roles": lf_roles
+            }
+            config_col.update_one({"id": "bot_config"}, {"$set": update_dict})
+            
+            # Apply bot status
+            asyncio.run_coroutine_threadsafe(bot.change_presence(activity=discord.Game(name=new_status)), bot.loop)
+            bot.command_prefix = new_prefix
+            return redirect(url_for('index'))
+
+    return render_template_string(HTML_TEMPLATE, config=conf, channels=channels, roles=roles)
 
 def run(): app.run(host="0.0.0.0", port=10000)
 threading.Thread(target=run).start()
