@@ -16,19 +16,39 @@ config_col = db['guild_configs']
 
 def get_guild_config(guild_id):
     conf = config_col.find_one({"guild_id": str(guild_id)})
+    
+    # Standard-Struktur für neue oder unvollständige Einträge
+    default_modules = {
+        "welcome": {"enabled": "False", "msg": "Welcome to the server!"},
+        "link_filter": {"enabled": "False", "chans": [], "roles": []},
+        "mod": {"enabled": "False", "roles": []},
+        "help": {"enabled": "False", "aliases": "help", "text": "Lava Network Support"},
+        "info": {"enabled": "False", "aliases": "info", "text": "Information Module"}
+    }
+
     if not conf:
-        default = {
-            "guild_id": str(guild_id), "prefix": "!", "status": "Lava Network",
-            "modules": {
-                "welcome": {"enabled": "False", "msg": "Welcome to the server!"},
-                "link_filter": {"enabled": "False", "chans": [], "roles": []},
-                "mod": {"enabled": "False", "roles": []},
-                "help": {"enabled": "False", "aliases": "help", "text": "Lava Network Support"},
-                "info": {"enabled": "False", "aliases": "info", "text": "Information Module"}
-            }
+        conf = {
+            "guild_id": str(guild_id), 
+            "prefix": "!", 
+            "status": "Lava Network",
+            "modules": default_modules
         }
-        config_col.insert_one(default)
-        return default
+        config_col.insert_one(conf)
+    else:
+        # FEHLER-FIX: Falls 'info' oder andere Module in alten DB-Einträgen fehlen
+        updated = False
+        if "modules" not in conf:
+            conf["modules"] = default_modules
+            updated = True
+        else:
+            for mod_name, mod_data in default_modules.items():
+                if mod_name not in conf["modules"]:
+                    conf["modules"][mod_name] = mod_data
+                    updated = True
+        
+        if updated:
+            config_col.replace_one({"guild_id": str(guild_id)}, conf)
+            
     return conf
 
 # --- BOT SETUP ---
