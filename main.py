@@ -11,17 +11,17 @@ from datetime import timedelta
 MONGO_URI = os.environ.get('MONGO_URI')
 client = MongoClient(MONGO_URI)
 db = client['lavabot_db']
-config_col = db['settings']
+config_col = db['guild_configs'] # Jetzt pro Server!
 
-def get_config():
-    conf = config_col.find_one({"id": "bot_config"})
+def get_guild_config(guild_id):
+    conf = config_col.find_one({"guild_id": str(guild_id)})
     if not conf:
         default = {
-            "id": "bot_config", "prefix": "!", "status": "LavaNetwork",
+            "guild_id": str(guild_id), "prefix": "!", "status": "LavaNetwork",
             "modules": {
                 "link_filter": {"enabled": "False", "chans": [], "roles": []},
                 "mod": {"enabled": "True", "roles": []},
-                "help": {"enabled": "True", "aliases": "help,info", "text": "Wir sind bald Fertig!"}
+                "help": {"enabled": "True", "aliases": "help", "text": "Wir sind bald Fertig!"}
             }
         }
         config_col.insert_one(default)
@@ -30,188 +30,168 @@ def get_config():
 
 # --- BOT SETUP ---
 intents = discord.Intents.all()
-def get_prefix(bot, message):
-    conf = get_config()
+async def get_prefix(bot, message):
+    if not message.guild: return "!"
+    conf = get_guild_config(message.guild.id)
     return conf.get("prefix", "!")
 
 bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
 
 @bot.event
 async def on_message(message):
-    if message.author == bot.user: return
+    if message.author == bot.user or not message.guild: return
     
-    conf = get_config()
+    conf = get_guild_config(message.guild.id)
     prefix = conf.get("prefix", "!")
     
-    # Link Filter Logik
-    lf = conf['modules'].get('link_filter', {})
-    if lf.get("enabled") == "True" and "http" in message.content:
-        if not lf.get("chans") or str(message.channel.id) in lf["chans"]:
+    # Link Filter
+    if conf['modules']['link_filter']['enabled'] == "True" and "http" in message.content:
+        lf = conf['modules']['link_filter']
+        if not lf['chans'] or str(message.channel.id) in lf['chans']:
             user_roles = [str(r.id) for r in message.author.roles]
-            if not any(rid in lf.get("roles", []) for rid in user_roles) and not message.author.guild_permissions.administrator:
+            if not any(rid in lf['roles'] for rid in user_roles) and not message.author.guild_permissions.administrator:
                 await message.delete()
                 return
 
-    # Dynamic Help Aliases Fix
-    hp = conf['modules'].get('help', {})
-    if hp.get("enabled") == "True":
-        aliases = [a.strip().lower() for a in hp.get("aliases", "help").split(",")]
-        content = message.content.lower()
-        for a in aliases:
-            if content == f"{prefix}{a}":
-                await message.channel.send(hp.get("text", "LavaBot Online!"))
-                return
+    # Help Aliases
+    hp = conf['modules']['help']
+    aliases = [a.strip().lower() for a in hp.get("aliases", "help").split(",")]
+    if any(message.content.lower() == f"{prefix}{a}" for a in aliases):
+        await message.channel.send(hp.get("text", "Online!"))
+        return
 
     await bot.process_commands(message)
 
-# --- MODERATION COMMANDS ---
-def is_mod():
-    async def predicate(ctx):
-        conf = get_config()
-        mod_roles = conf['modules']['mod'].get('roles', [])
-        user_roles = [str(r.id) for r in ctx.author.roles]
-        return any(rid in mod_roles for rid in user_roles) or ctx.author.guild_permissions.administrator
-    return commands.check(predicate)
-
-@bot.command()
-@is_mod()
-async def kick(ctx, member: discord.Member, *, reason=None):
-    await member.kick(reason=reason)
-    await ctx.send(f"✅ {member.name} wurde gekickt.")
-
-@bot.command()
-@is_mod()
-async def ban(ctx, member: discord.Member, *, reason=None):
-    await member.ban(reason=reason)
-    await ctx.send(f"🚫 {member.name} wurde gebannt.")
-
-@bot.command()
-@is_mod()
-async def timeout(ctx, member: discord.Member, minutes: int, *, reason=None):
-    duration = timedelta(minutes=minutes)
-    await member.timeout(duration, reason=reason)
-    await ctx.send(f"⏳ {member.name} für {minutes}m im Timeout.")
-
-# --- WEB UI (STRICT SEPARATION) ---
+# --- WEB UI ---
 app = Flask(__name__)
-app.secret_key = "lava_elite_final_v7"
+app.secret_key = "lava_multi_v8"
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Lava Client 🌋</title>
+    <title>Lava Client</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         :root { --bg: #060606; --side: #0b0b0b; --card: #121212; --accent: #ff3333; --border: #1e1e1e; --text: #f0f0f0; }
-        body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; margin: 0; display: flex; height: 100vh; overflow: hidden; }
+        body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; margin: 0; display: flex; height: 100vh; }
         .sidebar { width: 240px; background: var(--side); border-right: 1px solid var(--border); padding: 25px; flex-shrink: 0; }
-        .nav-btn { width: 100%; padding: 14px; background: none; border: none; color: #666; text-align: left; font-size: 15px; cursor: pointer; border-radius: 8px; margin-bottom: 8px; transition: 0.2s; }
-        .nav-btn:hover, .nav-btn.active { background: #1a1a1a; color: var(--accent); font-weight: bold; }
+        .nav-btn { width: 100%; padding: 14px; background: none; border: none; color: #666; text-align: left; cursor: pointer; border-radius: 8px; margin-bottom: 8px; }
+        .nav-btn.active { background: #1a1a1a; color: var(--accent); font-weight: bold; }
         .main { flex: 1; padding: 40px; overflow-y: auto; }
-        .content-section { display: none; }
-        .content-section.active { display: block; }
-        .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; transition: 0.3s; }
+        .guild-select-card:hover { border-color: var(--accent); cursor: pointer; transform: translateY(-3px); }
         .row { display: flex; align-items: center; gap: 12px; padding: 10px; border-bottom: 1px solid #1a1a1a; }
-        input[type="text"], textarea { width: 100%; padding: 12px; background: #000; border: 1px solid #222; color: white; border-radius: 5px; margin-top: 8px; }
-        .btn-save { background: var(--accent); color: white; border: none; padding: 16px 45px; border-radius: 8px; cursor: pointer; font-weight: bold; position: fixed; bottom: 30px; right: 30px; box-shadow: 0 4px 15px rgba(255, 51, 51, 0.3); }
+        input, textarea { width: 100%; padding: 12px; background: #000; border: 1px solid #222; color: white; border-radius: 5px; margin-top: 8px; }
+        .btn-save { background: var(--accent); color: white; border: none; padding: 15px 40px; border-radius: 8px; cursor: pointer; font-weight: bold; position: fixed; bottom: 30px; right: 30px; }
     </style>
-    <script>
-        function tab(id, el) {
-            document.querySelectorAll('.content-section').forEach(s => s.classList.remove('active'));
-            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-            document.getElementById(id).classList.add('active');
-            el.classList.add('active');
-        }
-    </script>
 </head>
 <body>
-    <div class="sidebar">
-        <h2 style="color:var(--accent); margin-bottom: 40px;">LAVA CLIENT 🌋</h2>
-        <button class="nav-btn active" onclick="tab('dash', this)"><i class="fas fa-th-large"></i> Dashboard</button>
-        <button class="nav-btn" onclick="tab('sett', this)"><i class="fas fa-sliders-h"></i> Settings</button>
+    {% if not session.user %}
+    <div style="margin: auto; width: 320px; background: var(--card); padding: 30px; border-radius: 15px; border: 1px solid var(--accent); text-align: center;">
+        <h2 style="color:var(--accent)">LAVA ACCESS</h2>
+        <form method="POST"><input type="text" name="user" placeholder="Name" required><br><input type="password" name="pw" placeholder="Key" required><br><br><button class="btn-save" style="position:static; width:100%">LOGIN</button></form>
     </div>
-
+    {% elif not session.guild_id %}
+    <div class="main" style="text-align: center;">
+        <h1 style="color:var(--accent)">Select Server</h1>
+        <p>Choose the server you want to configure:</p>
+        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px; margin-top: 30px;">
+            {% for g in guilds %}
+            <div class="card guild-select-card" onclick="location.href='/select/'+'{{ g.id }}'">
+                <div style="font-size: 40px; margin-bottom: 10px;"><i class="fas fa-server"></i></div>
+                <div style="font-weight: bold; font-size: 18px;">{{ g.name }}</div>
+                <div style="color: #555; font-size: 12px;">ID: {{ g.id }}</div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% else %}
+    <div class="sidebar">
+        <h2 style="color:var(--accent)">LAVA CLIENT</h2>
+        <p style="font-size: 11px; color: #444;">Server: {{ guild_name }}</p>
+        <button class="nav-btn active" onclick="location.href='/'">Dashboard</button>
+        <button class="nav-btn" onclick="location.href='/change_server'"><i class="fas fa-exchange-alt"></i> Change Server</button>
+        <a href="/logout" class="nav-btn" style="text-decoration:none; display:block; margin-top: 50px;">Logout</a>
+    </div>
     <div class="main">
         <form method="POST">
             <input type="hidden" name="action" value="save">
-            
-            <div id="dash" class="content-section active">
-                <h1>Dashboard</h1>
-                <div class="card">
-                    <h3>Global Settings</h3>
-                    <label>Bot Prefix:</label>
-                    <input type="text" name="prefix" value="{{ config.prefix }}">
-                    <br><br>
-                    <label>Bot Status:</label>
-                    <input type="text" name="status" value="{{ config.status }}">
+            <div class="card">
+                <h3>Global ({{ guild_name }})</h3>
+                Prefix: <input type="text" name="prefix" value="{{ config.prefix }}">
+                Status: <input type="text" name="status" value="{{ config.status }}">
+            </div>
+            <div class="card">
+                <h3>Help Module</h3>
+                Aliases: <input type="text" name="h_aliases" value="{{ config.modules.help.aliases }}">
+                Text: <textarea name="h_text">{{ config.modules.help.text }}</textarea>
+            </div>
+            <div class="card">
+                <h3>Permissions (Roles)</h3>
+                <div style="max-height: 200px; overflow-y: auto;">
+                    {% for r in roles %}
+                    <div class="row">
+                        <input type="checkbox" name="mod_roles" value="{{ r.id }}" {% if r.id|string in config.modules.mod.roles %}checked{% endif %}>
+                        <span>{{ r.name }}</span>
+                    </div>
+                    {% endfor %}
                 </div>
             </div>
-
-            <div id="sett" class="content-section">
-                <h1>Settings</h1>
-                
-                <div class="card">
-                    <h3>Help Module Configuration</h3>
-                    Aliases (z.B. help, info): <input type="text" name="h_aliases" value="{{ config.modules.help.aliases }}">
-                    Antwort-Text: <textarea name="h_text" rows="3">{{ config.modules.help.text }}</textarea>
-                </div>
-
-                <div class="card">
-                    <h3>Link Filter (Channels)</h3>
-                    <div style="max-height: 180px; overflow-y: auto; background: #080808; border-radius: 5px;">
-                        {% for c in discord.channels %}
-                        <div class="row">
-                            <input type="checkbox" name="lf_chans" value="{{ c.id }}" {% if c.id|string in config.modules.link_filter.chans %}checked{% endif %}>
-                            <span>{{ c.name }}</span>
-                        </div>
-                        {% endfor %}
-                    </div>
-                </div>
-
-                <div class="card">
-                    <h3>Moderation Roles (Kick/Ban/Timeout)</h3>
-                    <div style="max-height: 180px; overflow-y: auto; background: #080808; border-radius: 5px;">
-                        {% for r in discord.roles %}
-                        <div class="row">
-                            <input type="checkbox" name="mod_roles" value="{{ r.id }}" {% if r.id|string in config.modules.mod.roles %}checked{% endif %}>
-                            <span>{{ r.name }}</span>
-                        </div>
-                        {% endfor %}
-                    </div>
-                </div>
-            </div>
-
-            <button type="submit" class="btn-save">DEPLOY CHANGES</button>
+            <button type="submit" class="btn-save">SAVE CONFIG</button>
         </form>
     </div>
+    {% endif %}
 </body>
 </html>
 """
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    conf = get_config()
-    guild = bot.guilds[0] if bot.guilds else None
-    discord_data = {
-        "channels": [{"id": c.id, "name": c.name} for c in guild.text_channels] if guild else [],
-        "roles": [{"id": r.id, "name": r.name} for r in guild.roles if not r.managed and r.name != "@everyone"] if guild else []
-    }
+    if request.method == "POST":
+        if "pw" in request.form and request.form.get("pw") == "10":
+            session['user'] = request.form.get("user")
+            return redirect(url_for('index'))
+        
+        if request.form.get("action") == "save":
+            updates = {
+                "prefix": request.form.get("prefix"),
+                "status": request.form.get("status"),
+                "modules.help.aliases": request.form.get("h_aliases"),
+                "modules.help.text": request.form.get("h_text"),
+                "modules.mod.roles": request.form.getlist("mod_roles")
+            }
+            config_col.update_one({"guild_id": session['guild_id']}, {"$set": updates})
+            return redirect(url_for('index'))
 
-    if request.method == "POST" and request.form.get("action") == "save":
-        updates = {
-            "prefix": request.form.get("prefix"),
-            "status": request.form.get("status"),
-            "modules.help.aliases": request.form.get("h_aliases"),
-            "modules.help.text": request.form.get("h_text"),
-            "modules.link_filter.chans": request.form.getlist("lf_chans"),
-            "modules.mod.roles": request.form.getlist("mod_roles")
-        }
-        config_col.update_one({"id": "bot_config"}, {"$set": updates})
-        asyncio.run_coroutine_threadsafe(bot.change_presence(activity=discord.Game(name=updates['status'])), bot.loop)
-        return redirect(url_for('index'))
+    guilds = [{"name": g.name, "id": str(g.id)} for g in bot.guilds]
+    
+    conf = None
+    roles = []
+    guild_name = ""
+    if 'guild_id' in session:
+        conf = get_guild_config(session['guild_id'])
+        g = bot.get_guild(int(session['guild_id']))
+        if g:
+            guild_name = g.name
+            roles = [{"id": r.id, "name": r.name} for r in g.roles if not r.managed and r.name != "@everyone"]
 
-    return render_template_string(HTML_TEMPLATE, config=conf, discord=discord_data)
+    return render_template_string(HTML_TEMPLATE, config=conf, guilds=guilds, roles=roles, guild_name=guild_name)
+
+@app.route("/select/<guild_id>")
+def select_guild(guild_id):
+    session['guild_id'] = guild_id
+    return redirect(url_for('index'))
+
+@app.route("/change_server")
+def change_server():
+    session.pop('guild_id', None)
+    return redirect(url_for('index'))
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for('index'))
 
 def run(): app.run(host="0.0.0.0", port=10000)
 threading.Thread(target=run).start()
