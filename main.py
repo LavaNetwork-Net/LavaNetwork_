@@ -1,46 +1,91 @@
 import discord
 from discord.ext import commands
-from flask import Flask, request, render_template_string, session, redirect, url_for
+from flask import Flask, request, render_template_string, session, redirect
 import threading
 import os
 from pymongo import MongoClient
 import asyncio
-from datetime import timedelta
+from datetime import timedelta, datetime
 import re
 
-# --- DATABASE SETUP ---
+# --- DATABASE ---
 MONGO_URI = os.environ.get('MONGO_URI')
 client = MongoClient(MONGO_URI)
 db = client['lavabot_db']
 config_col = db['guild_configs']
+warns_col = db['warnings']
+cases_col = db['mod_cases']
+counting_col = db['counting']
 
 def get_guild_config(guild_id):
     conf = config_col.find_one({"guild_id": str(guild_id)})
     default_modules = {
         "link_filter": {"enabled": "False", "chans": [], "roles": []},
         "mod": {"enabled": "False", "roles": []},
-        "help": {"enabled": "False", "aliases": "help", "text": "Lava Network Support"},
-        "info": {"enabled": "False", "aliases": "info", "text": "Information Module"},
+        "help": {"enabled": "False", "aliases": "help", "text": "Support"},
+        "info": {"enabled": "False", "aliases": "info", "text": "Info"},
         "dms": {
             "welcome_enabled": "False", "welcome_msg": "Welcome to {server}!",
-            "kick_enabled": "False", "kick_msg": "Your Account Got Kicked From {server}",
-            "ban_enabled": "False", "ban_msg": "You were permanently banned from {server}",
-            "timeout_enabled": "False", "timeout_msg": "You have been timed out in {server}"
-        }
+            "kick_enabled": "False", "kick_msg": "You were kicked from {server}.",
+            "ban_enabled": "False", "ban_msg": "You were banned from {server}.",
+            "timeout_enabled": "False", "timeout_msg": "You were timed out in {server}.",
+            "warn_enabled": "False", "warn_msg": "You received a warning in {server}: {reason}",
+            "unban_enabled": "False", "unban_msg": "You were unbanned from {server}.",
+            "mute_enabled": "False", "mute_msg": "You were muted in {server}."
+        },
+        "welcome_channel": {
+            "enabled": "False", "channel_id": "", "message": "Welcome {user} to {server}!",
+            "embed": "False", "embed_color": "#ff3333", "embed_title": "Welcome!",
+            "show_member_count": "True"
+        },
+        "leave_channel": {"enabled": "False", "channel_id": "", "message": "{user} left {server}."},
+        "logging": {
+            "enabled": "False", "channel_id": "",
+            "log_deletes": "True", "log_edits": "True",
+            "log_joins": "True", "log_leaves": "True",
+            "log_bans": "True", "log_roles": "True", "log_mods": "True"
+        },
+        "auto_mod": {
+            "enabled": "False", "blacklist": [], "blacklist_action": "delete",
+            "caps_filter": "False", "caps_threshold": "70",
+            "spam_filter": "False", "spam_count": "5", "spam_seconds": "5"
+        },
+        "auto_role": {"enabled": "False", "role_id": ""},
+        "warn_system": {"enabled": "False", "warn_threshold_kick": "0", "warn_threshold_ban": "0"},
+        "giveaway": {"enabled": "False"},
+        "tickets": {
+            "enabled": "False",
+            "support_role_id": "",
+            "categories": {
+                "support": {"enabled": "True", "label": "Support", "emoji": "🎫", "category_id": "", "description": "General support"},
+                "store": {"enabled": "True", "label": "Store", "emoji": "🛒", "category_id": "", "description": "Purchase help"},
+                "apply": {"enabled": "True", "label": "Apply", "emoji": "📋", "category_id": "", "description": "Staff applications"},
+                "report": {"enabled": "True", "label": "User Report", "emoji": "🚨", "category_id": "", "description": "Report a user"},
+                "bug": {"enabled": "True", "label": "Bug Report", "emoji": "🐛", "category_id": "", "description": "Report a bug"}
+            }
+        },
+        "counting": {"enabled": "False", "channel_id": ""},
+        "status": {"type": "playing", "text": "Lava Network"}
     }
+
     if not conf:
-        conf = {"guild_id": str(guild_id), "prefix": "!", "status": "Lava Network", "modules": default_modules}
+        conf = {"guild_id": str(guild_id), "prefix": "!", "bot_name": "LAVA", "accent_color": "#ff3333", "modules": default_modules}
         config_col.insert_one(conf)
     else:
         updated = False
         if "modules" not in conf:
-            conf["modules"] = default_modules
-            updated = True
+            conf["modules"] = default_modules; updated = True
         else:
             for mod_name, mod_data in default_modules.items():
                 if mod_name not in conf["modules"]:
-                    conf["modules"][mod_name] = mod_data
-                    updated = True
+                    conf["modules"][mod_name] = mod_data; updated = True
+                elif isinstance(mod_data, dict):
+                    for key, val in mod_data.items():
+                        if key not in conf["modules"][mod_name]:
+                            conf["modules"][mod_name][key] = val; updated = True
+        for field in ["bot_name", "accent_color"]:
+            if field not in conf:
+                conf[field] = "LAVA" if field == "bot_name" else "#ff3333"; updated = True
         if updated:
             config_col.replace_one({"guild_id": str(guild_id)}, conf)
     return conf
@@ -49,1275 +94,1069 @@ def get_guild_config(guild_id):
 intents = discord.Intents.all()
 async def get_prefix(bot, message):
     if not message.guild: return "!"
-    conf = get_guild_config(message.guild.id)
-    return conf.get("prefix", "!")
+    return get_guild_config(message.guild.id).get("prefix", "!")
 
 bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
+spam_tracker = {}
 
-# --- FONT TRANSLATOR ---
-def format_font(text, font_type):
-    text = text.lower().replace(" ", "-")
-    fonts = {
-        "gothic": "𝔞𝔟𝔠𝔡𝔢𝔣𝔤𝔥𝔦𝔧𝔨𝔩𝔪𝔫𝔬𝔭𝔮𝔯𝔰𝔱𝔲𝔳𝔴𝔵𝔶𝔷",
-        "fancy": "𝓪𝓫𝓬𝓭𝓮𝓯𝓰𝓱𝓲𝓳𝓴𝓵𝓶𝓷𝓸𝓹𝓺𝓻𝓼𝓽𝓾𝓿𝔀𝔁𝔂𝔃",
-        "smallcaps": "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘqʀꜱᴛᴜᴠᴡxʏᴢ"
-    }
-    return text.translate(str.maketrans("abcdefghijklmnopqrstuvwxyz", fonts[font_type])) if font_type in fonts else text
-
-# --- DM HELPER ---
-async def send_user_dm(member, msg_template, guild_name):
+# --- HELPERS ---
+async def send_user_dm(member, msg_template, guild_name, extra={}):
     try:
         content = msg_template.replace("{server}", guild_name)
+        for k, v in extra.items(): content = content.replace(f"{{{k}}}", str(v))
         await member.send(content)
-    except:
-        pass
+    except: pass
+
+async def log_action(guild, conf, description, color=0xff3333, fields=None):
+    lc = conf['modules'].get('logging', {})
+    if lc.get('enabled') != "True" or not lc.get('channel_id'): return
+    ch = guild.get_channel(int(lc['channel_id']))
+    if not ch: return
+    embed = discord.Embed(description=description, color=color, timestamp=datetime.utcnow())
+    if fields:
+        for name, value, inline in fields: embed.add_field(name=name, value=value[:1024], inline=inline)
+    await ch.send(embed=embed)
+
+async def add_mod_case(guild_id, action, mod, target, reason):
+    n = cases_col.count_documents({"guild_id": str(guild_id)}) + 1
+    cases_col.insert_one({"guild_id": str(guild_id), "case": n, "action": action, "mod": str(mod), "target": str(target), "reason": reason or "No reason", "timestamp": datetime.utcnow().isoformat()})
+    return n
+
+def has_mod_perms(ctx, conf):
+    return any(str(r.id) in conf['modules']['mod']['roles'] for r in ctx.author.roles) or ctx.author.guild_permissions.administrator
+
+async def _add_warn(guild, member, mod, reason, conf):
+    warns_col.insert_one({"guild_id": str(guild.id), "user_id": str(member.id), "user_name": str(member), "mod": str(mod), "reason": reason, "timestamp": datetime.utcnow().isoformat()})
+    total = warns_col.count_documents({"guild_id": str(guild.id), "user_id": str(member.id)})
+    dmc = conf['modules']['dms']
+    if dmc.get("warn_enabled") == "True": await send_user_dm(member, dmc["warn_msg"], guild.name, {"reason": reason})
+    ws = conf['modules'].get('warn_system', {})
+    kt = int(ws.get('warn_threshold_kick', 0)); bt = int(ws.get('warn_threshold_ban', 0))
+    if bt > 0 and total >= bt:
+        if dmc.get("ban_enabled") == "True": await send_user_dm(member, dmc["ban_msg"], guild.name)
+        await member.ban(reason=f"Auto-ban: {total} warnings")
+    elif kt > 0 and total >= kt:
+        if dmc.get("kick_enabled") == "True": await send_user_dm(member, dmc["kick_msg"], guild.name)
+        await member.kick(reason=f"Auto-kick: {total} warnings")
+    return total
+
+# --- STATUS HELPER ---
+async def _set_status(stype, text):
+    am = {'playing': discord.Game(name=text), 'watching': discord.Activity(type=discord.ActivityType.watching, name=text), 'listening': discord.Activity(type=discord.ActivityType.listening, name=text), 'competing': discord.Activity(type=discord.ActivityType.competing, name=text)}
+    await bot.change_presence(activity=am.get(stype, discord.Game(name=text)))
 
 # --- BOT EVENTS ---
 @bot.event
+async def on_ready():
+    print(f"Ready: {bot.user}")
+    for guild in bot.guilds:
+        conf = get_guild_config(guild.id)
+        sc = conf['modules'].get('status', {})
+        await _set_status(sc.get('type', 'playing'), sc.get('text', 'Lava Network'))
+        break
+
+@bot.event
 async def on_member_join(member):
     conf = get_guild_config(member.guild.id)
-    dm_conf = conf['modules']['dms']
-    if dm_conf.get("welcome_enabled") == "True":
-        await send_user_dm(member, dm_conf["welcome_msg"], member.guild.name)
+    dmc = conf['modules']['dms']
+    if dmc.get("welcome_enabled") == "True": await send_user_dm(member, dmc["welcome_msg"], member.guild.name, {"user": member.name})
+    wc = conf['modules'].get('welcome_channel', {})
+    if wc.get('enabled') == "True" and wc.get('channel_id'):
+        ch = member.guild.get_channel(int(wc['channel_id']))
+        if ch:
+            msg = wc.get('message', 'Welcome {user}!').replace("{user}", member.mention).replace("{server}", member.guild.name)
+            if wc.get('show_member_count') == "True": msg += f"\nWe now have **{member.guild.member_count}** members!"
+            if wc.get('embed') == "True":
+                c = int(wc.get('embed_color', '#ff3333').lstrip('#'), 16)
+                e = discord.Embed(title=wc.get('embed_title', 'Welcome!'), description=msg, color=c)
+                e.set_thumbnail(url=member.display_avatar.url)
+                await ch.send(embed=e)
+            else: await ch.send(msg)
+    ar = conf['modules'].get('auto_role', {})
+    if ar.get('enabled') == "True" and ar.get('role_id'):
+        role = member.guild.get_role(int(ar['role_id']))
+        if role:
+            try: await member.add_roles(role)
+            except: pass
+    if conf['modules'].get('logging', {}).get('log_joins') == "True":
+        await log_action(member.guild, conf, f"✅ **{member}** joined.", 0x00ff88)
+
+@bot.event
+async def on_member_remove(member):
+    conf = get_guild_config(member.guild.id)
+    lc = conf['modules'].get('leave_channel', {})
+    if lc.get('enabled') == "True" and lc.get('channel_id'):
+        ch = member.guild.get_channel(int(lc['channel_id']))
+        if ch:
+            msg = lc.get('message', '{user} left.').replace("{user}", str(member)).replace("{server}", member.guild.name)
+            await ch.send(msg)
+    if conf['modules'].get('logging', {}).get('log_leaves') == "True":
+        await log_action(member.guild, conf, f"❌ **{member}** left.", 0xff6600)
+
+@bot.event
+async def on_message_delete(message):
+    if message.author.bot or not message.guild: return
+    conf = get_guild_config(message.guild.id)
+    if conf['modules'].get('logging', {}).get('log_deletes') == "True":
+        await log_action(message.guild, conf, f"🗑️ Message by **{message.author}** deleted in {message.channel.mention}", 0xffcc00, [("Content", message.content or "(empty)", False)])
+
+@bot.event
+async def on_message_edit(before, after):
+    if before.author.bot or not before.guild or before.content == after.content: return
+    conf = get_guild_config(before.guild.id)
+    if conf['modules'].get('logging', {}).get('log_edits') == "True":
+        await log_action(before.guild, conf, f"✏️ Message edited by **{before.author}** in {before.channel.mention}", 0x3399ff, [("Before", before.content or "(empty)", False), ("After", after.content or "(empty)", False)])
+
+@bot.event
+async def on_member_update(before, after):
+    if before.roles == after.roles: return
+    conf = get_guild_config(before.guild.id)
+    if conf['modules'].get('logging', {}).get('log_roles') == "True":
+        added = [r for r in after.roles if r not in before.roles]
+        removed = [r for r in before.roles if r not in after.roles]
+        if added: await log_action(before.guild, conf, f"🎭 **{before}** gained **{added[0].name}**", 0x00ccff)
+        if removed: await log_action(before.guild, conf, f"🎭 **{before}** lost **{removed[0].name}**", 0xff6666)
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user or not message.guild: return
     conf = get_guild_config(message.guild.id)
     prefix = conf.get("prefix", "!")
+
+    # COUNTING
+    cm = conf['modules'].get('counting', {})
+    if cm.get('enabled') == "True" and cm.get('channel_id') and str(message.channel.id) == cm['channel_id']:
+        state = counting_col.find_one({"guild_id": str(message.guild.id)}) or {"count": 0, "last_user": None}
+        try: number = int(message.content.strip())
+        except:
+            await message.add_reaction("❌")
+            await message.channel.send(f"{message.author.mention} Only numbers! Count resets to **0**.", delete_after=5)
+            counting_col.update_one({"guild_id": str(message.guild.id)}, {"$set": {"count": 0, "last_user": None}}, upsert=True)
+            return
+        expected = state.get('count', 0) + 1
+        last_user = state.get('last_user')
+        if number != expected or str(message.author.id) == last_user:
+            await message.add_reaction("❌")
+            reason = "Wrong number!" if number != expected else "You can't count twice in a row!"
+            await message.channel.send(f"{message.author.mention} ❌ {reason} Next: **1**.", delete_after=6)
+            counting_col.update_one({"guild_id": str(message.guild.id)}, {"$set": {"count": 0, "last_user": None}}, upsert=True)
+        else:
+            await message.add_reaction("✅")
+            counting_col.update_one({"guild_id": str(message.guild.id)}, {"$set": {"count": number, "last_user": str(message.author.id)}}, upsert=True)
+        return
+
+    # LINK FILTER
     lf = conf['modules'].get('link_filter', {})
     if lf.get('enabled') == "True" and str(message.channel.id) in lf.get('chans', []):
         user_roles = [str(r.id) for r in message.author.roles]
-        has_bypass = any(rid in lf.get('roles', []) for rid in user_roles) or message.author.guild_permissions.administrator
-        if not has_bypass and re.search(r'http[s]?://', message.content.lower()):
+        bypass = any(rid in lf.get('roles', []) for rid in user_roles) or message.author.guild_permissions.administrator
+        if not bypass and re.search(r'http[s]?://', message.content.lower()):
             await message.delete()
-            await message.channel.send(f"**{message.author.mention}**, links are prohibited.", delete_after=5)
+            await message.channel.send(f"{message.author.mention} links not allowed here.", delete_after=5)
             return
-    for mod in ['help', 'info']:
-        m_data = conf['modules'][mod]
-        if m_data['enabled'] == "True":
-            aliases = [a.strip().lower() for a in m_data.get("aliases", mod).split(",")]
-            if any(message.content.lower() == f"{prefix}{a}" for a in aliases):
-                await message.channel.send(m_data.get("text"))
+
+    # AUTO-MOD
+    am = conf['modules'].get('auto_mod', {})
+    if am.get('enabled') == "True" and not message.author.guild_permissions.administrator:
+        cl = message.content.lower()
+        for word in am.get('blacklist', []):
+            if word.lower() in cl:
+                await message.delete()
+                if am.get('blacklist_action') == 'warn': await _add_warn(message.guild, message.author, bot.user, "Auto-Mod: Blacklisted word", conf)
+                await message.channel.send(f"{message.author.mention} message removed.", delete_after=5)
                 return
+        if am.get('caps_filter') == "True" and len(message.content) > 10:
+            caps = sum(1 for c in message.content if c.isupper())
+            if caps / len(message.content) * 100 >= int(am.get('caps_threshold', 70)):
+                await message.delete()
+                await message.channel.send(f"{message.author.mention} too many caps.", delete_after=5)
+                return
+        if am.get('spam_filter') == "True":
+            key = f"{message.guild.id}:{message.author.id}"; now = datetime.utcnow().timestamp()
+            sc = int(am.get('spam_count', 5)); ss = int(am.get('spam_seconds', 5))
+            spam_tracker.setdefault(key, [])
+            spam_tracker[key] = [t for t in spam_tracker[key] if now - t < ss]
+            spam_tracker[key].append(now)
+            if len(spam_tracker[key]) >= sc:
+                await message.delete()
+                await message.channel.send(f"{message.author.mention} slow down!", delete_after=5)
+                spam_tracker[key] = []; return
+
+    # HELP / INFO
+    for mod in ['help', 'info']:
+        md = conf['modules'][mod]
+        if md['enabled'] == "True":
+            aliases = [a.strip().lower() for a in md.get("aliases", mod).split(",")]
+            if any(message.content.lower() == f"{prefix}{a}" for a in aliases):
+                await message.channel.send(md.get("text")); return
+
     await bot.process_commands(message)
 
-# --- MODERATION COMMANDS ---
+# --- COUNTING COMMAND ---
+@bot.command()
+async def setcounting(ctx):
+    if not ctx.author.guild_permissions.administrator: return
+    config_col.update_one({"guild_id": str(ctx.guild.id)}, {"$set": {"modules.counting.enabled": "True", "modules.counting.channel_id": str(ctx.channel.id)}})
+    counting_col.update_one({"guild_id": str(ctx.guild.id)}, {"$set": {"count": 0, "last_user": None}}, upsert=True)
+    await ctx.send(f"✅ Counting set to {ctx.channel.mention}! Start with **1**.")
+
+# --- MOD COMMANDS ---
+@bot.command()
+async def warn(ctx, member: discord.Member, *, reason=None):
+    conf = get_guild_config(ctx.guild.id)
+    if conf['modules']['mod']['enabled'] != "True" or not has_mod_perms(ctx, conf): return
+    total = await _add_warn(ctx.guild, member, ctx.author, reason or "No reason", conf)
+    case = await add_mod_case(ctx.guild.id, "WARN", ctx.author, member, reason)
+    await ctx.send(f"⚠️ **{member}** warned · {total} total · Case #{case}")
+    if conf['modules'].get('logging', {}).get('log_mods') == "True":
+        await log_action(ctx.guild, conf, f"⚠️ **{member}** warned by **{ctx.author}**\nReason: {reason}", 0xffcc00)
+
+@bot.command()
+async def warns(ctx, member: discord.Member):
+    ws = list(warns_col.find({"guild_id": str(ctx.guild.id), "user_id": str(member.id)}))
+    if not ws: await ctx.send(f"**{member}** has no warnings."); return
+    e = discord.Embed(title=f"Warnings — {member}", color=0xff3333)
+    for i, w in enumerate(ws[-10:], 1): e.add_field(name=f"#{i}", value=f"**{w['reason']}** · by {w['mod']}", inline=False)
+    await ctx.send(embed=e)
+
+@bot.command()
+async def clearwarns(ctx, member: discord.Member):
+    conf = get_guild_config(ctx.guild.id)
+    if not has_mod_perms(ctx, conf): return
+    warns_col.delete_many({"guild_id": str(ctx.guild.id), "user_id": str(member.id)})
+    await ctx.send(f"✅ Cleared warnings for **{member}**.")
+
 @bot.command()
 async def kick(ctx, member: discord.Member, *, reason=None):
     conf = get_guild_config(ctx.guild.id)
-    if conf['modules']['mod']['enabled'] == "True":
-        if any(str(r.id) in conf['modules']['mod']['roles'] for r in ctx.author.roles) or ctx.author.guild_permissions.administrator:
-            dm_conf = conf['modules']['dms']
-            if dm_conf.get("kick_enabled") == "True":
-                await send_user_dm(member, dm_conf["kick_msg"], ctx.guild.name)
-            await member.kick(reason=reason)
-            await ctx.send(f"**{member}** was kicked.")
+    if conf['modules']['mod']['enabled'] != "True" or not has_mod_perms(ctx, conf): return
+    dmc = conf['modules']['dms']
+    if dmc.get("kick_enabled") == "True": await send_user_dm(member, dmc["kick_msg"], ctx.guild.name)
+    await member.kick(reason=reason)
+    case = await add_mod_case(ctx.guild.id, "KICK", ctx.author, member, reason)
+    await ctx.send(f"👢 **{member}** kicked. Case #{case}")
+    if conf['modules'].get('logging', {}).get('log_mods') == "True":
+        await log_action(ctx.guild, conf, f"👢 **{member}** kicked by **{ctx.author}**\nReason: {reason}", 0xff6600)
 
 @bot.command()
 async def ban(ctx, member: discord.Member, *, reason=None):
     conf = get_guild_config(ctx.guild.id)
-    if conf['modules']['mod']['enabled'] == "True":
-        if any(str(r.id) in conf['modules']['mod']['roles'] for r in ctx.author.roles) or ctx.author.guild_permissions.administrator:
-            dm_conf = conf['modules']['dms']
-            if dm_conf.get("ban_enabled") == "True":
-                await send_user_dm(member, dm_conf["ban_msg"], ctx.guild.name)
-            await member.ban(reason=reason)
-            await ctx.send(f"**{member}** was banned.")
+    if conf['modules']['mod']['enabled'] != "True" or not has_mod_perms(ctx, conf): return
+    dmc = conf['modules']['dms']
+    if dmc.get("ban_enabled") == "True": await send_user_dm(member, dmc["ban_msg"], ctx.guild.name)
+    await member.ban(reason=reason)
+    case = await add_mod_case(ctx.guild.id, "BAN", ctx.author, member, reason)
+    await ctx.send(f"🔨 **{member}** banned. Case #{case}")
+    if conf['modules'].get('logging', {}).get('log_mods') == "True":
+        await log_action(ctx.guild, conf, f"🔨 **{member}** banned by **{ctx.author}**\nReason: {reason}", 0xff0000)
+
+@bot.command()
+async def unban(ctx, user_id: int, *, reason=None):
+    conf = get_guild_config(ctx.guild.id)
+    if not has_mod_perms(ctx, conf): return
+    try:
+        user = await bot.fetch_user(user_id)
+        await ctx.guild.unban(user, reason=reason)
+        dmc = conf['modules']['dms']
+        if dmc.get("unban_enabled") == "True": await send_user_dm(user, dmc["unban_msg"], ctx.guild.name)
+        await ctx.send(f"✅ **{user}** unbanned.")
+    except Exception as e: await ctx.send(f"Error: {e}")
 
 @bot.command()
 async def timeout(ctx, member: discord.Member, minutes: int, *, reason=None):
     conf = get_guild_config(ctx.guild.id)
-    if conf['modules']['mod']['enabled'] == "True":
-        if any(str(r.id) in conf['modules']['mod']['roles'] for r in ctx.author.roles) or ctx.author.guild_permissions.administrator:
-            dm_conf = conf['modules']['dms']
-            if dm_conf.get("timeout_enabled") == "True":
-                await send_user_dm(member, dm_conf["timeout_msg"], ctx.guild.name)
-            await member.timeout(timedelta(minutes=minutes), reason=reason)
-            await ctx.send(f"**{member}** timed out for {minutes}m.")
+    if conf['modules']['mod']['enabled'] != "True" or not has_mod_perms(ctx, conf): return
+    dmc = conf['modules']['dms']
+    if dmc.get("timeout_enabled") == "True": await send_user_dm(member, dmc["timeout_msg"], ctx.guild.name)
+    await member.timeout(timedelta(minutes=minutes), reason=reason)
+    case = await add_mod_case(ctx.guild.id, f"TIMEOUT {minutes}m", ctx.author, member, reason)
+    await ctx.send(f"⏰ **{member}** timed out {minutes}m. Case #{case}")
 
-# --- WEB UI (FLASK) ---
+@bot.command()
+async def mute(ctx, member: discord.Member, *, reason=None):
+    conf = get_guild_config(ctx.guild.id)
+    if not has_mod_perms(ctx, conf): return
+    role = discord.utils.get(ctx.guild.roles, name="Muted")
+    if not role:
+        role = await ctx.guild.create_role(name="Muted")
+        for ch in ctx.guild.channels:
+            try: await ch.set_permissions(role, send_messages=False, speak=False)
+            except: pass
+    await member.add_roles(role, reason=reason)
+    dmc = conf['modules']['dms']
+    if dmc.get("mute_enabled") == "True": await send_user_dm(member, dmc["mute_msg"], ctx.guild.name)
+    await ctx.send(f"🔇 **{member}** muted.")
+
+@bot.command()
+async def unmute(ctx, member: discord.Member):
+    role = discord.utils.get(ctx.guild.roles, name="Muted")
+    if role and role in member.roles:
+        await member.remove_roles(role)
+        await ctx.send(f"🔊 **{member}** unmuted.")
+
+@bot.command()
+async def slowmode(ctx, channel: discord.TextChannel = None, seconds: int = 0):
+    conf = get_guild_config(ctx.guild.id)
+    if not has_mod_perms(ctx, conf): return
+    target = channel or ctx.channel
+    await target.edit(slowmode_delay=seconds)
+    await ctx.send(f"🐌 Slowmode set to **{seconds}s** in {target.mention}.")
+
+@bot.command()
+async def purge(ctx, amount: int):
+    conf = get_guild_config(ctx.guild.id)
+    if not has_mod_perms(ctx, conf): return
+    deleted = await ctx.channel.purge(limit=amount + 1)
+    await ctx.send(f"🧹 Deleted **{len(deleted)-1}** messages.", delete_after=3)
+
+@bot.command()
+async def cases(ctx):
+    all_cases = list(cases_col.find({"guild_id": str(ctx.guild.id)}).sort("case", -1).limit(10))
+    if not all_cases: await ctx.send("No cases."); return
+    e = discord.Embed(title="Mod Cases", color=0xff3333)
+    for c in all_cases: e.add_field(name=f"#{c['case']} {c['action']}", value=f"**{c['target']}** · {c['reason']}", inline=False)
+    await ctx.send(embed=e)
+
+@bot.command()
+async def giveaway(ctx, duration: str, *, prize: str):
+    conf = get_guild_config(ctx.guild.id)
+    if conf['modules']['giveaway']['enabled'] != "True" or not has_mod_perms(ctx, conf): return
+    unit = duration[-1].lower()
+    try: amount = int(duration[:-1])
+    except: await ctx.send("Example: `!giveaway 1h Nitro`"); return
+    seconds = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}.get(unit, 0) * amount
+    if not seconds: return
+    e = discord.Embed(title="🎉 GIVEAWAY 🎉", description=f"**Prize:** {prize}\n**Duration:** {duration}\n\nReact with 🎉 to enter!", color=0xffd700)
+    e.set_footer(text=f"Hosted by {ctx.author}")
+    msg = await ctx.send(embed=e)
+    await msg.add_reaction("🎉")
+    await asyncio.sleep(seconds)
+    msg = await ctx.channel.fetch_message(msg.id)
+    reaction = discord.utils.get(msg.reactions, emoji="🎉")
+    users = [u async for u in reaction.users() if not u.bot]
+    if not users: await ctx.send("No entries.")
+    else:
+        import random
+        await ctx.send(f"🎉 {random.choice(users).mention} won **{prize}**!")
+
+# --- TICKET SYSTEM ---
+class TicketSelect(discord.ui.Select):
+    def __init__(self, conf):
+        tc = conf['modules']['tickets']
+        cats = tc.get('categories', {})
+        cat_order = ['support', 'store', 'apply', 'report', 'bug']
+        options = []
+        for key in cat_order:
+            cat_conf = cats.get(key, {})
+            if cat_conf.get('enabled', 'True') == "True":
+                options.append(discord.SelectOption(
+                    label=cat_conf.get('label', key.title()),
+                    emoji=cat_conf.get('emoji', '🎫'),
+                    value=key,
+                    description=cat_conf.get('description', '')
+                ))
+        super().__init__(placeholder="Select ticket type...", options=options, custom_id="ticket_select")
+
+    async def callback(self, interaction: discord.Interaction):
+        conf = get_guild_config(interaction.guild.id)
+        tc = conf['modules']['tickets']
+        cat_key = self.values[0]
+        cat_conf = tc.get('categories', {}).get(cat_key, {})
+        cat_id = cat_conf.get('category_id', '')
+        support_role_id = tc.get('support_role_id', '')
+        category = interaction.guild.get_channel(int(cat_id)) if cat_id and cat_id.isdigit() else None
+        support_role = interaction.guild.get_role(int(support_role_id)) if support_role_id and support_role_id.isdigit() else None
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        if support_role: overwrites[support_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        label = cat_conf.get('label', cat_key)
+        ch = await interaction.guild.create_text_channel(f"ticket-{label.lower()}-{interaction.user.name}", category=category, overwrites=overwrites)
+        close_view = CloseTicketView()
+        e = discord.Embed(title=f"{cat_conf.get('emoji','🎫')} {label} Ticket", description=f"{interaction.user.mention} your ticket has been created!\n{support_role.mention if support_role else ''}", color=0xff3333)
+        await ch.send(embed=e, view=close_view)
+        await interaction.response.send_message(f"✅ Ticket created: {ch.mention}", ephemeral=True)
+
+class TicketView(discord.ui.View):
+    def __init__(self, conf):
+        super().__init__(timeout=None)
+        self.add_item(TicketSelect(conf))
+
+class CloseTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.red, custom_id="ticket_close")
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Closing in 5 seconds...")
+        await asyncio.sleep(5)
+        await interaction.channel.delete()
+
+@bot.command()
+async def setticket(ctx):
+    conf = get_guild_config(ctx.guild.id)
+    if conf['modules']['tickets']['enabled'] != "True" or not ctx.author.guild_permissions.administrator: return
+    e = discord.Embed(title="🎫 Support Tickets", description="Select a category below to open a ticket.", color=0xff3333)
+    await ctx.send(embed=e, view=TicketView(conf))
+    await ctx.message.delete()
+
+# ============================================================
+# FLASK WEB DASHBOARD
+# ============================================================
 app = Flask(__name__)
-app.secret_key = "lava_ultimate_mega_key"
+app.secret_key = "lava_ultra_key_v3"
 
-HTML_TEMPLATE = """
+HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Lava Network &mdash; Dashboard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+<meta charset="UTF-8">
+<title>{{ bot_name }} Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<style>
+:root {
+  --bg: #0d0d0f; --surface: #141416; --surface2: #1c1c20; --surface3: #232328;
+  --border: #222226; --border2: #2c2c32;
+  --accent: {{ accent_color }};
+  --accent-dim: {{ accent_color }}18;
+  --accent-soft: {{ accent_color }}44;
+  --text: #ededf0; --text2: #a0a0b0; --text3: #606070;
+  --success: #22c55e; --danger: #ef4444; --warning: #f59e0b; --info: #3b82f6;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif; display: flex; height: 100vh; overflow: hidden; font-size: 14px; }
+::-webkit-scrollbar { width: 3px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 99px; }
 
-    :root {
-      --bg:       #0a0a0b;
-      --surface:  #111114;
-      --card:     #16161a;
-      --border:   #1f1f26;
-      --border2:  #2a2a35;
-      --accent:   #e03535;
-      --accent-d: #b82b2b;
-      --accent-g: rgba(224,53,53,0.12);
-      --text:     #f0f0f4;
-      --muted:    #7a7a8c;
-      --muted2:   #4a4a5a;
-      --success:  #22c55e;
-      --warn:     #f59e0b;
-      --radius:   10px;
-      --radius-lg:16px;
-    }
+/* ── SIDEBAR ── */
+.sidebar { width: 216px; flex-shrink: 0; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+.sb-head { padding: 18px 14px 14px; border-bottom: 1px solid var(--border); }
+.sb-logo { font-size: 14px; font-weight: 600; color: var(--accent); letter-spacing: .04em; }
+.sb-guild { font-size: 11px; color: var(--text3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: 'DM Mono', monospace; }
+.sb-nav { flex: 1; overflow-y: auto; padding: 6px 6px; }
+.sb-section { margin-bottom: 2px; }
+.sb-section-lbl { font-size: 10px; font-weight: 500; color: var(--text3); letter-spacing: .07em; text-transform: uppercase; font-family: 'DM Mono', monospace; padding: 8px 8px 3px; display: block; }
+.nb { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 9px; border-radius: 6px; border: none; background: none; color: var(--text2); cursor: pointer; font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 500; text-align: left; transition: all .12s; white-space: nowrap; overflow: hidden; }
+.nb i { width: 13px; text-align: center; font-size: 11px; flex-shrink: 0; }
+.nb:hover { background: var(--surface2); color: var(--text); }
+.nb.active { background: var(--accent-dim); color: var(--accent); }
+.sb-foot { padding: 6px; border-top: 1px solid var(--border); }
 
-    html, body { height: 100%; }
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: 'Inter', sans-serif;
-      font-size: 14px;
-      line-height: 1.6;
-    }
+/* ── MAIN ── */
+.main { flex: 1; overflow-y: auto; }
+.inner { max-width: 820px; margin: 0 auto; padding: 30px 28px 100px; }
 
-    /* ---- SCROLLBAR ---- */
-    ::-webkit-scrollbar { width: 4px; height: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 99px; }
+/* ── PAGE ── */
+.page { display: none; }
+.page.active { display: block; animation: fu .16s ease; }
+@keyframes fu { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+.ph { margin-bottom: 22px; }
+.pt { font-size: 20px; font-weight: 600; }
+.ps { font-size: 12px; color: var(--text3); margin-top: 3px; }
 
-    /* ============================
-       LOGIN PAGE
-    ============================ */
-    .login-wrap {
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(224,53,53,0.07) 0%, transparent 70%);
-    }
-    .login-card {
-      width: 380px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
-      padding: 48px 40px 40px;
-      box-shadow: 0 32px 64px rgba(0,0,0,0.6);
-    }
-    .login-logo {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      margin-bottom: 8px;
-    }
-    .login-logo-icon {
-      width: 40px; height: 40px;
-      background: var(--accent);
-      border-radius: 10px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 18px;
-      box-shadow: 0 0 24px rgba(224,53,53,0.35);
-    }
-    .login-logo span {
-      font-size: 22px; font-weight: 800;
-      letter-spacing: 3px;
-      color: var(--text);
-    }
-    .login-sub {
-      text-align: center;
-      color: var(--muted);
-      font-size: 13px;
-      margin-bottom: 36px;
-    }
-    .form-field { margin-bottom: 16px; }
-    .form-field label {
-      display: block;
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.8px;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 6px;
-    }
-    .form-field input, .form-field textarea, .form-field select {
-      width: 100%;
-      background: #0d0d10;
-      border: 1px solid var(--border2);
-      color: var(--text);
-      border-radius: var(--radius);
-      padding: 11px 14px;
-      font-size: 14px;
-      font-family: inherit;
-      outline: none;
-      transition: border-color 0.2s, box-shadow 0.2s;
-      resize: vertical;
-    }
-    .form-field input:focus, .form-field textarea:focus, .form-field select:focus {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(224,53,53,0.12);
-    }
-    .form-field textarea { min-height: 90px; }
-    .form-field select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237a7a8c' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 36px; cursor: pointer; }
-    .btn-primary {
-      width: 100%; padding: 12px;
-      background: var(--accent);
-      color: #fff;
-      border: none; border-radius: var(--radius);
-      font-size: 14px; font-weight: 700;
-      letter-spacing: 0.5px;
-      cursor: pointer;
-      transition: background 0.2s, box-shadow 0.2s, transform 0.1s;
-      box-shadow: 0 4px 20px rgba(224,53,53,0.3);
-    }
-    .btn-primary:hover { background: var(--accent-d); box-shadow: 0 6px 24px rgba(224,53,53,0.4); }
-    .btn-primary:active { transform: scale(0.98); }
+/* ── CARDS ── */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 14px; }
+.ch { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.ct { font-size: 11px; font-weight: 500; color: var(--text3); text-transform: uppercase; letter-spacing: .07em; font-family: 'DM Mono', monospace; }
+.g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.g3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; }
 
-    /* ============================
-       SERVER SELECT
-    ============================ */
-    .select-wrap {
-      min-height: 100vh;
-      padding: 60px 40px;
-      background: radial-gradient(ellipse 60% 40% at 50% 0%, rgba(224,53,53,0.06) 0%, transparent 70%);
-    }
-    .select-header {
-      text-align: center;
-      margin-bottom: 48px;
-    }
-    .select-header h1 {
-      font-size: 28px; font-weight: 800;
-      letter-spacing: 1px;
-    }
-    .select-header h1 span { color: var(--accent); }
-    .select-header p { color: var(--muted); margin-top: 8px; }
-    .servers-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-      gap: 16px;
-      max-width: 1000px;
-      margin: 0 auto;
-    }
-    .server-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
-      padding: 28px 24px;
-      cursor: pointer;
-      text-decoration: none;
-      display: flex; align-items: center; gap: 16px;
-      transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
-    }
-    .server-card:hover {
-      border-color: var(--accent);
-      transform: translateY(-2px);
-      box-shadow: 0 12px 32px rgba(0,0,0,0.4);
-    }
-    .server-avatar {
-      width: 48px; height: 48px;
-      background: linear-gradient(135deg, var(--accent) 0%, #7a1010 100%);
-      border-radius: 14px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 20px; font-weight: 800; color: #fff;
-      flex-shrink: 0;
-    }
-    .server-info strong { display: block; font-weight: 600; color: var(--text); font-size: 15px; }
-    .server-info span { color: var(--muted); font-size: 12px; }
+/* ── STATS ── */
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 14px 16px; }
+.stat-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.stat-lbl { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: .07em; font-family: 'DM Mono', monospace; }
+.stat-ico { width: 26px; height: 26px; background: var(--accent-dim); border-radius: 6px; display: flex; align-items: center; justify-content: center; color: var(--accent); font-size: 11px; }
+.stat-val { font-size: 26px; font-weight: 600; font-family: 'DM Mono', monospace; }
 
-    /* ============================
-       MAIN LAYOUT
-    ============================ */
-    .layout { display: flex; height: 100vh; overflow: hidden; }
+/* ── MODULE ROWS ── */
+.mr { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.mr:last-child { border: none; padding-bottom: 0; }
+.mr-l { display: flex; align-items: center; gap: 9px; }
+.mr-ic { width: 28px; height: 28px; background: var(--surface2); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--text3); }
+.mr-name { font-size: 13px; font-weight: 500; }
+.badge-on { font-size: 10px; font-family: 'DM Mono', monospace; padding: 2px 7px; border-radius: 4px; background: #16301f; color: var(--success); }
+.badge-off { font-size: 10px; font-family: 'DM Mono', monospace; padding: 2px 7px; border-radius: 4px; background: var(--surface2); color: var(--text3); }
 
-    /* ---- SIDEBAR ---- */
-    .sidebar {
-      width: 240px;
-      flex-shrink: 0;
-      background: var(--surface);
-      border-right: 1px solid var(--border);
-      display: flex; flex-direction: column;
-      overflow-y: auto;
-    }
-    .sidebar-brand {
-      padding: 24px 20px 20px;
-      display: flex; align-items: center; gap: 10px;
-      border-bottom: 1px solid var(--border);
-    }
-    .brand-icon {
-      width: 32px; height: 32px;
-      background: var(--accent);
-      border-radius: 8px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 14px;
-      box-shadow: 0 0 16px rgba(224,53,53,0.3);
-      flex-shrink: 0;
-    }
-    .brand-text { font-size: 14px; font-weight: 800; letter-spacing: 2px; color: var(--text); }
-    .brand-sub { font-size: 10px; color: var(--muted); font-weight: 400; letter-spacing: 0; display: block; margin-top: 1px; }
+/* ── FORM ── */
+.f { margin-bottom: 13px; }
+.f:last-child { margin-bottom: 0; }
+.fl { display: block; font-size: 11px; font-weight: 500; color: var(--text3); margin-bottom: 5px; font-family: 'DM Mono', monospace; }
+input[type="text"], input[type="password"], input[type="number"], textarea, select {
+  width: 100%; padding: 8px 11px; background: var(--surface2); border: 1px solid var(--border2);
+  color: var(--text); border-radius: 7px; font-family: 'DM Sans', sans-serif; font-size: 13px; outline: none; transition: border .13s;
+}
+input:focus, textarea:focus, select:focus { border-color: var(--accent-soft); }
+input[type="color"] { height: 36px; padding: 3px 5px; cursor: pointer; border-radius: 7px; width: 100%; background: var(--surface2); border: 1px solid var(--border2); }
+textarea { resize: vertical; min-height: 68px; }
 
-    .sidebar-section { padding: 20px 12px 8px; }
-    .section-label {
-      font-size: 10px; font-weight: 700;
-      letter-spacing: 1.2px; text-transform: uppercase;
-      color: var(--muted2);
-      padding: 0 8px; margin-bottom: 4px;
-    }
-    .nav-item {
-      display: flex; align-items: center; gap: 10px;
-      padding: 9px 10px;
-      border-radius: 8px;
-      color: var(--muted);
-      font-size: 13px; font-weight: 500;
-      cursor: pointer;
-      border: none; background: none; width: 100%; text-align: left;
-      transition: background 0.15s, color 0.15s;
-      text-decoration: none;
-    }
-    .nav-item i { width: 16px; text-align: center; font-size: 13px; flex-shrink: 0; }
-    .nav-item:hover { background: rgba(255,255,255,0.04); color: var(--text); }
-    .nav-item.active { background: var(--accent-g); color: var(--accent); font-weight: 600; }
-    .nav-item.active i { color: var(--accent); }
+/* ── TOGGLE ── */
+.tr { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.tr:last-child { border: none; }
+.ti .tl { font-size: 13px; font-weight: 500; }
+.ti .ts { font-size: 11px; color: var(--text3); margin-top: 1px; font-family: 'DM Mono', monospace; }
+.sw { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+.sw input { opacity: 0; width: 0; height: 0; }
+.sl { position: absolute; inset: 0; background: var(--surface3); border: 1px solid var(--border2); border-radius: 99px; cursor: pointer; transition: .18s; }
+.sl::before { content: ""; position: absolute; width: 12px; height: 12px; left: 3px; top: 3px; background: var(--text3); border-radius: 50%; transition: .18s; }
+input:checked + .sl { background: var(--accent); border-color: var(--accent); }
+input:checked + .sl::before { background: #fff; transform: translateX(16px); }
 
-    .sidebar-footer {
-      margin-top: auto;
-      padding: 12px;
-      border-top: 1px solid var(--border);
-    }
+/* ── SCROLL LIST ── */
+.sl-box { max-height: 170px; overflow-y: auto; background: var(--surface2); border: 1px solid var(--border); border-radius: 7px; }
+.ci { display: flex; align-items: center; gap: 8px; padding: 7px 11px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.ci:last-child { border: none; }
+.ci:hover { background: #ffffff04; }
+input[type="checkbox"] { width: 13px; height: 13px; accent-color: var(--accent); flex-shrink: 0; }
 
-    /* ---- TOPBAR ---- */
-    .topbar {
-      height: 60px;
-      background: var(--surface);
-      border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 0 32px;
-      flex-shrink: 0;
-    }
-    .topbar-left { display: flex; align-items: center; gap: 8px; }
-    .topbar-guild {
-      display: flex; align-items: center; gap: 10px;
-    }
-    .topbar-avatar {
-      width: 28px; height: 28px;
-      background: var(--accent);
-      border-radius: 6px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 11px; font-weight: 800; color: #fff;
-    }
-    .topbar-name { font-size: 14px; font-weight: 600; }
-    .topbar-right { display: flex; align-items: center; gap: 8px; }
-    .topbar-btn {
-      display: flex; align-items: center; gap: 7px;
-      padding: 6px 12px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      color: var(--muted);
-      font-size: 12px; font-weight: 500;
-      cursor: pointer;
-      text-decoration: none;
-      transition: border-color 0.15s, color 0.15s;
-    }
-    .topbar-btn:hover { border-color: var(--border2); color: var(--text); }
-    .topbar-btn.danger:hover { border-color: var(--accent); color: var(--accent); }
+/* ── TAG INPUT ── */
+.tag-row { display: flex; gap: 7px; margin-bottom: 7px; }
+.tag-row input { flex: 1; }
+.btn-add { padding: 8px 14px; background: var(--surface2); border: 1px solid var(--border2); color: var(--text2); border-radius: 7px; cursor: pointer; font-size: 13px; font-family: 'DM Sans', sans-serif; white-space: nowrap; transition: .13s; }
+.btn-add:hover { border-color: var(--accent-soft); color: var(--accent); }
+.tags { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 11px; min-height: 20px; }
+.tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px 2px 9px; background: var(--surface2); border: 1px solid var(--border2); border-radius: 5px; font-size: 12px; font-family: 'DM Mono', monospace; }
+.tag-x { cursor: pointer; color: var(--text3); font-size: 10px; padding: 1px 2px; border-radius: 2px; }
+.tag-x:hover { color: var(--danger); }
 
-    /* ---- CONTENT ---- */
-    .content-wrap {
-      flex: 1;
-      display: flex; flex-direction: column;
-      overflow: hidden;
-    }
-    .content-body {
-      flex: 1;
-      overflow-y: auto;
-      padding: 32px;
-    }
+/* ── TABLE ── */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th { text-align: left; padding: 8px 11px; font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: .06em; font-family: 'DM Mono', monospace; border-bottom: 1px solid var(--border); font-weight: 500; }
+.tbl td { padding: 9px 11px; border-bottom: 1px solid var(--border); }
+.tbl tr:last-child td { border: none; }
+.tbl tr:hover td { background: #ffffff03; }
+.pill { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-family: 'DM Mono', monospace; font-weight: 600; }
+.pw { background: #451a03; color: var(--warning); }
+.pk { background: #431407; color: #fb923c; }
+.pb { background: #450a0a; color: var(--danger); }
+.po { background: #172554; color: #60a5fa; }
 
-    .page { display: none; }
-    .page.active { display: block; }
+/* ── FONT CREATOR ── */
+.fgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.fcard { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.flabel { font-size: 10px; color: var(--text3); font-family: 'DM Mono', monospace; margin-bottom: 5px; text-transform: uppercase; letter-spacing: .06em; }
+.ftext { font-size: 15px; word-break: break-all; min-height: 22px; }
+.cpbtn { display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; padding: 4px 9px; background: var(--surface); border: 1px solid var(--border2); border-radius: 5px; color: var(--text3); font-size: 11px; cursor: pointer; font-family: 'DM Mono', monospace; transition: .13s; }
+.cpbtn:hover { color: var(--accent); border-color: var(--accent-soft); }
+.cpbtn.ok { color: var(--success); border-color: var(--success); }
 
-    /* ---- PAGE HEADER ---- */
-    .page-header { margin-bottom: 28px; }
-    .page-header h1 { font-size: 22px; font-weight: 700; }
-    .page-header p { color: var(--muted); font-size: 13px; margin-top: 4px; }
+/* ── DIVIDER ── */
+hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 
-    /* ---- CARDS ---- */
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
-      padding: 24px;
-      margin-bottom: 20px;
-    }
-    .card-title {
-      font-size: 13px; font-weight: 600;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.8px;
-      margin-bottom: 16px;
-      display: flex; align-items: center; gap: 8px;
-    }
-    .card-title i { color: var(--accent); font-size: 12px; }
+/* ── SAVE BAR ── */
+.savebar { position: fixed; bottom: 0; left: 216px; right: 0; padding: 12px 28px; background: var(--surface); border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: flex-end; gap: 12px; z-index: 100; }
+.btn-save { padding: 8px 24px; background: var(--accent); color: #fff; border: none; border-radius: 7px; font-family: 'DM Sans', sans-serif; font-weight: 600; font-size: 13px; cursor: pointer; transition: .13s; }
+.btn-save:hover { opacity: .85; }
+.save-hint { font-size: 11px; color: var(--text3); }
 
-    /* ---- STAT CARDS ---- */
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-      gap: 16px;
-      margin-bottom: 24px;
-    }
-    .stat-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
-      padding: 20px 22px;
-      display: flex; align-items: center; gap: 16px;
-    }
-    .stat-icon {
-      width: 42px; height: 42px;
-      border-radius: 10px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 17px; flex-shrink: 0;
-    }
-    .stat-icon.red { background: rgba(224,53,53,0.12); color: var(--accent); }
-    .stat-icon.green { background: rgba(34,197,94,0.12); color: var(--success); }
-    .stat-icon.amber { background: rgba(245,158,11,0.12); color: var(--warn); }
-    .stat-icon.blue { background: rgba(59,130,246,0.12); color: #3b82f6; }
-    .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
-    .stat-value { font-size: 22px; font-weight: 700; }
+/* ── AUTH ── */
+.auth-wrap { margin: auto; width: 340px; }
+.auth-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 32px 28px; }
+.auth-logo { font-size: 16px; font-weight: 600; color: var(--accent); margin-bottom: 3px; }
+.auth-sub { font-size: 12px; color: var(--text3); margin-bottom: 24px; }
+.auth-btn { width: 100%; padding: 9px; background: var(--accent); color: #fff; border: none; border-radius: 7px; font-family: 'DM Sans', sans-serif; font-weight: 600; font-size: 13px; cursor: pointer; margin-top: 2px; }
+.err { font-size: 12px; color: var(--danger); padding: 7px 11px; background: #450a0a33; border-radius: 6px; margin-bottom: 11px; border: 1px solid #450a0a66; }
 
-    /* ---- MODULE STATUS BADGES ---- */
-    .badge {
-      display: inline-flex; align-items: center; gap: 5px;
-      padding: 3px 10px;
-      border-radius: 99px;
-      font-size: 11px; font-weight: 600;
-    }
-    .badge.on { background: rgba(34,197,94,0.12); color: var(--success); }
-    .badge.off { background: rgba(255,255,255,0.05); color: var(--muted); }
-    .badge::before { content: ''; display: block; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+/* ── SERVER SELECT ── */
+.sgrid { display: grid; grid-template-columns: repeat(auto-fill,minmax(170px,1fr)); gap: 10px; margin-top: 20px; }
+.scard { background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 18px; cursor: pointer; text-align: center; font-size: 13px; font-weight: 500; transition: .13s; }
+.scard:hover { border-color: var(--accent-soft); color: var(--accent); transform: translateY(-1px); }
+.scard i { font-size: 18px; color: var(--text3); display: block; margin-bottom: 7px; }
+.scard:hover i { color: var(--accent); }
 
-    /* ---- MODULE GRID ---- */
-    .module-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-      gap: 14px;
-    }
-    .module-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
-      padding: 20px;
-      display: flex; flex-direction: column; gap: 12px;
-    }
-    .module-card-head {
-      display: flex; align-items: center; justify-content: space-between;
-    }
-    .module-icon-wrap {
-      display: flex; align-items: center; gap: 10px;
-    }
-    .module-icon {
-      width: 36px; height: 36px;
-      border-radius: 9px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 14px;
-      background: var(--accent-g); color: var(--accent);
-    }
-    .module-name { font-size: 14px; font-weight: 600; }
-    .module-desc { font-size: 12px; color: var(--muted); }
-
-    /* ---- TOGGLE SWITCH ---- */
-    .toggle-wrap {
-      display: flex; align-items: center; gap: 10px;
-    }
-    .toggle-wrap label { font-size: 13px; color: var(--muted); cursor: pointer; }
-    .toggle {
-      position: relative; display: inline-block;
-      width: 40px; height: 22px;
-    }
-    .toggle input { opacity: 0; width: 0; height: 0; }
-    .toggle-slider {
-      position: absolute; inset: 0;
-      background: var(--border2);
-      border-radius: 22px;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-    .toggle-slider::after {
-      content: '';
-      position: absolute;
-      left: 3px; top: 3px;
-      width: 16px; height: 16px;
-      background: #fff;
-      border-radius: 50%;
-      transition: transform 0.2s;
-    }
-    .toggle input:checked + .toggle-slider { background: var(--accent); }
-    .toggle input:checked + .toggle-slider::after { transform: translateX(18px); }
-    .toggle input:focus-visible + .toggle-slider { box-shadow: 0 0 0 3px var(--accent-g); }
-
-    /* ---- CHECKBOX LIST ---- */
-    .check-list {
-      max-height: 200px; overflow-y: auto;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      background: #0d0d10;
-    }
-    .check-item {
-      display: flex; align-items: center; gap: 10px;
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--border);
-      transition: background 0.1s;
-      cursor: pointer;
-    }
-    .check-item:last-child { border-bottom: none; }
-    .check-item:hover { background: rgba(255,255,255,0.02); }
-    .check-item input[type="checkbox"] {
-      width: 16px; height: 16px;
-      accent-color: var(--accent);
-      cursor: pointer; flex-shrink: 0;
-    }
-    .check-item span { font-size: 13px; color: var(--text); }
-    .check-item .item-icon { font-size: 11px; color: var(--muted); margin-right: 2px; }
-
-    /* ---- FORM SECTION ---- */
-    .form-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 16px;
-    }
-    @media (max-width: 640px) { .form-row { grid-template-columns: 1fr; } }
-
-    .section-divider {
-      border: none;
-      border-top: 1px solid var(--border);
-      margin: 24px 0;
-    }
-
-    .dm-block {
-      padding: 20px;
-      background: #0d0d10;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      margin-bottom: 14px;
-    }
-    .dm-block-head {
-      display: flex; align-items: center; justify-content: space-between;
-      margin-bottom: 14px;
-    }
-    .dm-block-title {
-      display: flex; align-items: center; gap: 8px;
-      font-size: 13px; font-weight: 600;
-    }
-    .dm-block-title i { color: var(--accent); font-size: 13px; }
-
-    /* ---- SAVE BAR ---- */
-    .save-bar {
-      position: sticky; bottom: 0;
-      background: var(--surface);
-      border-top: 1px solid var(--border);
-      padding: 14px 32px;
-      display: flex; align-items: center; justify-content: space-between;
-      z-index: 10;
-    }
-    .save-bar p { font-size: 12px; color: var(--muted); }
-    .btn-save {
-      display: flex; align-items: center; gap: 8px;
-      padding: 10px 28px;
-      background: var(--accent);
-      color: #fff;
-      border: none; border-radius: var(--radius);
-      font-size: 14px; font-weight: 700;
-      cursor: pointer;
-      transition: background 0.2s, box-shadow 0.2s, transform 0.1s;
-      box-shadow: 0 4px 20px rgba(224,53,53,0.25);
-    }
-    .btn-save:hover { background: var(--accent-d); box-shadow: 0 6px 24px rgba(224,53,53,0.35); }
-    .btn-save:active { transform: scale(0.98); }
-
-    /* ---- TOAST ---- */
-    #toast {
-      position: fixed; bottom: 80px; right: 32px;
-      background: #1a1a20;
-      border: 1px solid var(--border2);
-      border-left: 3px solid var(--success);
-      border-radius: var(--radius);
-      padding: 12px 18px;
-      color: var(--text); font-size: 13px;
-      display: flex; align-items: center; gap: 10px;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-      transform: translateX(120px);
-      opacity: 0;
-      transition: transform 0.3s cubic-bezier(.22,1,.36,1), opacity 0.3s;
-      z-index: 999;
-      pointer-events: none;
-    }
-    #toast.show { transform: translateX(0); opacity: 1; }
-    #toast i { color: var(--success); }
-
-    /* ---- CREATE CHANNEL BUTTON ---- */
-    .btn-secondary {
-      display: inline-flex; align-items: center; gap: 8px;
-      padding: 10px 20px;
-      background: var(--card);
-      border: 1px solid var(--border2);
-      color: var(--text);
-      border-radius: var(--radius);
-      font-size: 13px; font-weight: 600;
-      cursor: pointer;
-      transition: background 0.15s, border-color 0.15s;
-    }
-    .btn-secondary:hover { background: #1e1e24; border-color: var(--accent); color: var(--accent); }
-
-    /* ---- FONT PREVIEW ---- */
-    .font-preview {
-      background: #0d0d10;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 12px 14px;
-      font-size: 15px;
-      color: var(--muted);
-      margin-top: 4px;
-      min-height: 42px;
-    }
-
-    /* ---- EMPTY STATE ---- */
-    .empty-state {
-      text-align: center;
-      padding: 40px 20px;
-      color: var(--muted);
-    }
-    .empty-state i { font-size: 28px; margin-bottom: 10px; display: block; }
-    .empty-state p { font-size: 13px; }
-  </style>
+.code { font-family: 'DM Mono', monospace; background: var(--surface2); padding: 1px 5px; border-radius: 3px; font-size: 12px; color: var(--accent); }
+.muted { color: var(--text3); }
+</style>
 </head>
 <body>
 
 {% if not session.user %}
-<!-- ======================== LOGIN ======================== -->
-<div class="login-wrap">
-  <div class="login-card">
-    <div class="login-logo">
-      <div class="login-logo-icon"><i class="fas fa-fire" style="color:#fff"></i></div>
-      <span>LAVA</span>
-    </div>
-    <p class="login-sub">Control Panel &mdash; Authorized Access Only</p>
+<div class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-logo">{{ bot_name }}</div>
+    <div class="auth-sub">Admin Dashboard · Sign in to continue</div>
+    {% if login_error %}<div class="err">Incorrect password.</div>{% endif %}
     <form method="POST">
-      <div class="form-field">
-        <label>Admin Name</label>
-        <input type="text" name="user" placeholder="Enter your name" required autocomplete="username">
-      </div>
-      <div class="form-field">
-        <label>Access Key</label>
-        <input type="password" name="pw" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" required autocomplete="current-password">
-      </div>
-      <div style="margin-top:24px">
-        <button type="submit" class="btn-primary"><i class="fas fa-sign-in-alt" style="margin-right:8px"></i>Sign In</button>
-      </div>
+      <div class="f"><label class="fl">Username</label><input type="text" name="user" placeholder="admin" required></div>
+      <div class="f"><label class="fl">Password</label><input type="password" name="pw" placeholder="••••••••" required></div>
+      <button type="submit" class="auth-btn">Sign in</button>
     </form>
   </div>
 </div>
 
 {% elif not session.guild_id %}
-<!-- ======================== SERVER SELECT ======================== -->
-<div class="select-wrap">
-  <div class="select-header">
-    <h1>Choose a <span>Server</span></h1>
-    <p>Select the server you want to manage</p>
-  </div>
-  {% if guilds %}
-  <div class="servers-grid">
-    {% for g in guilds %}
-    <a href="/select/{{ g.id }}" class="server-card">
-      <div class="server-avatar">{{ g.name[0].upper() }}</div>
-      <div class="server-info">
-        <strong>{{ g.name }}</strong>
-        <span>Click to manage</span>
-      </div>
-    </a>
-    {% endfor %}
-  </div>
-  {% else %}
-  <div class="empty-state">
-    <i class="fas fa-server"></i>
-    <p>No servers found. Make sure the bot is in at least one server.</p>
-  </div>
-  {% endif %}
-  <div style="text-align:center; margin-top:40px;">
-    <a href="/logout" class="topbar-btn danger"><i class="fas fa-sign-out-alt"></i> Logout</a>
+<div class="main" style="padding:36px;">
+  <div style="max-width:760px;margin:0 auto;">
+    <div class="ph"><div class="pt">Select a Server</div><div class="ps">Choose which server to manage.</div></div>
+    <div class="sgrid">
+      {% for g in guilds %}<div class="scard" onclick="location.href='/select/{{ g.id }}'"><i class="fas fa-server"></i>{{ g.name }}</div>{% endfor %}
+    </div>
   </div>
 </div>
 
 {% else %}
-<!-- ======================== DASHBOARD ======================== -->
-<div class="layout">
-
-  <!-- SIDEBAR -->
-  <nav class="sidebar">
-    <div class="sidebar-brand">
-      <div class="brand-icon"><i class="fas fa-fire" style="color:#fff; font-size:13px"></i></div>
-      <div>
-        <div class="brand-text">LAVA</div>
-        <span class="brand-sub">Network Panel</span>
-      </div>
+<div class="sidebar">
+  <div class="sb-head">
+    <div class="sb-logo">{{ bot_name }}</div>
+    <div class="sb-guild">{{ guild_name }}</div>
+  </div>
+  <div class="sb-nav">
+    <div class="sb-section">
+      <span class="sb-section-lbl">Overview</span>
+      <button class="nb active" onclick="sp('dash',this)"><i class="fas fa-home"></i>Dashboard</button>
     </div>
-
-    <div class="sidebar-section">
-      <div class="section-label">Core</div>
-      <button class="nav-item active" onclick="showPage('dash',this)">
-        <i class="fas fa-home"></i> Overview
-      </button>
-      <button class="nav-item" onclick="showPage('sett',this)">
-        <i class="fas fa-sliders-h"></i> Settings
-      </button>
+    <div class="sb-section">
+      <span class="sb-section-lbl">Config</span>
+      <button class="nb" onclick="sp('appearance',this)"><i class="fas fa-palette"></i>Appearance</button>
+      <button class="nb" onclick="sp('settings',this)"><i class="fas fa-sliders-h"></i>Settings</button>
     </div>
-
-    <div class="sidebar-section">
-      <div class="section-label">Modules</div>
-      <button class="nav-item" onclick="showPage('links',this)">
-        <i class="fas fa-shield-alt"></i> Link Filter
-      </button>
-      <button class="nav-item" onclick="showPage('mod',this)">
-        <i class="fas fa-gavel"></i> Moderation
-      </button>
-      <button class="nav-item" onclick="showPage('dms',this)">
-        <i class="fas fa-envelope"></i> DM System
-      </button>
-      <button class="nav-item" onclick="showPage('help',this)">
-        <i class="fas fa-question-circle"></i> Help Command
-      </button>
-      <button class="nav-item" onclick="showPage('info',this)">
-        <i class="fas fa-info-circle"></i> Info Command
-      </button>
+    <div class="sb-section">
+      <span class="sb-section-lbl">Modules</span>
+      <button class="nb" onclick="sp('welcome',this)"><i class="fas fa-door-open"></i>Welcome / Leave</button>
+      <button class="nb" onclick="sp('automod',this)"><i class="fas fa-shield-alt"></i>Auto-Mod</button>
+      <button class="nb" onclick="sp('linkfilter',this)"><i class="fas fa-link"></i>Link Filter</button>
+      <button class="nb" onclick="sp('mod',this)"><i class="fas fa-gavel"></i>Moderation</button>
+      <button class="nb" onclick="sp('warnsys',this)"><i class="fas fa-exclamation-triangle"></i>Warn System</button>
+      <button class="nb" onclick="sp('tickets',this)"><i class="fas fa-ticket-alt"></i>Tickets</button>
+      <button class="nb" onclick="sp('counting',this)"><i class="fas fa-sort-numeric-up"></i>Counting</button>
+      <button class="nb" onclick="sp('roles',this)"><i class="fas fa-user-tag"></i>Auto Role</button>
+      <button class="nb" onclick="sp('logging',this)"><i class="fas fa-list-alt"></i>Logging</button>
+      <button class="nb" onclick="sp('giveaway',this)"><i class="fas fa-gift"></i>Giveaway</button>
     </div>
-
-    <div class="sidebar-section">
-      <div class="section-label">Tools</div>
-      <button class="nav-item" onclick="showPage('creator',this)">
-        <i class="fas fa-plus-circle"></i> Channel Creator
-      </button>
+    <div class="sb-section">
+      <span class="sb-section-lbl">Content</span>
+      <button class="nb" onclick="sp('dms',this)"><i class="fas fa-envelope"></i>DM Notifications</button>
+      <button class="nb" onclick="sp('helpinfo',this)"><i class="fas fa-question-circle"></i>Help / Info</button>
+      <button class="nb" onclick="sp('fonts',this)"><i class="fas fa-font"></i>Font Creator</button>
     </div>
-
-    <div class="sidebar-footer">
-      <a href="/change_server" class="nav-item"><i class="fas fa-exchange-alt"></i> Switch Server</a>
-      <a href="/logout" class="nav-item" style="color: var(--accent)"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    <div class="sb-section">
+      <span class="sb-section-lbl">Records</span>
+      <button class="nb" onclick="sp('cases',this)"><i class="fas fa-folder-open"></i>Mod Cases</button>
     </div>
-  </nav>
+  </div>
+  <div class="sb-foot">
+    <button class="nb" onclick="location.href='/change_server'"><i class="fas fa-exchange-alt"></i>Switch Server</button>
+    <button class="nb" onclick="location.href='/logout'"><i class="fas fa-sign-out-alt"></i>Logout</button>
+  </div>
+</div>
 
-  <!-- CONTENT -->
-  <div class="content-wrap">
-    <!-- TOPBAR -->
-    <div class="topbar">
-      <div class="topbar-left">
-        <div class="topbar-guild">
-          <div class="topbar-avatar">{{ guild_name[0].upper() if guild_name else 'S' }}</div>
-          <div class="topbar-name">{{ guild_name }}</div>
-        </div>
-      </div>
-      <div class="topbar-right">
-        <a href="/change_server" class="topbar-btn"><i class="fas fa-exchange-alt"></i> Switch</a>
-        <a href="/logout" class="topbar-btn danger"><i class="fas fa-sign-out-alt"></i> Logout</a>
-      </div>
+<div class="main">
+<div class="inner">
+<form method="POST">
+<input type="hidden" name="action" value="save">
+
+<!-- DASHBOARD -->
+<div id="dash" class="page active">
+  <div class="ph"><div class="pt">Dashboard</div><div class="ps">{{ guild_name }}</div></div>
+  <div class="g3" style="margin-bottom:14px;">
+    <div class="stat"><div class="stat-top"><div class="stat-lbl">Members</div><div class="stat-ico"><i class="fas fa-users"></i></div></div><div class="stat-val">{{ member_count }}</div></div>
+    <div class="stat"><div class="stat-top"><div class="stat-lbl">Warnings</div><div class="stat-ico"><i class="fas fa-exclamation"></i></div></div><div class="stat-val">{{ total_warns }}</div></div>
+    <div class="stat"><div class="stat-top"><div class="stat-lbl">Mod Cases</div><div class="stat-ico"><i class="fas fa-gavel"></i></div></div><div class="stat-val">{{ total_cases }}</div></div>
+  </div>
+  <div class="card">
+    <div class="ct" style="margin-bottom:10px;">Modules</div>
+    {% set mods=[('link_filter','Link Filter','fa-link'),('mod','Moderation','fa-gavel'),('auto_mod','Auto-Mod','fa-shield-alt'),('logging','Logging','fa-list-alt'),('welcome_channel','Welcome','fa-door-open'),('tickets','Tickets','fa-ticket-alt'),('counting','Counting','fa-sort-numeric-up'),('giveaway','Giveaway','fa-gift')] %}
+    {% for k,lbl,ic in mods %}
+    <div class="mr">
+      <div class="mr-l"><div class="mr-ic"><i class="fas {{ ic }}"></i></div><div class="mr-name">{{ lbl }}</div></div>
+      {% if config.modules[k].enabled=='True' %}<span class="badge-on">● active</span>{% else %}<span class="badge-off">inactive</span>{% endif %}
     </div>
+    {% endfor %}
+  </div>
+</div>
 
-    <form method="POST" id="mainForm">
-      <input type="hidden" name="action" value="save">
+<!-- APPEARANCE -->
+<div id="appearance" class="page">
+  <div class="ph"><div class="pt">Appearance</div><div class="ps">Dashboard branding and bot status.</div></div>
+  <div class="card">
+    <div class="ct" style="margin-bottom:12px;">Branding</div>
+    <div class="g2">
+      <div class="f"><label class="fl">Dashboard Name</label><input type="text" name="bot_name" value="{{ bot_name }}"></div>
+      <div class="f"><label class="fl">Accent Color</label><input type="color" name="accent_color" value="{{ accent_color }}"></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="ct" style="margin-bottom:12px;">Bot Status</div>
+    <div class="g2">
+      <div class="f"><label class="fl">Type</label><select name="status_type">{% for t in ['playing','watching','listening','competing'] %}<option value="{{ t }}" {% if config.modules.status.type==t %}selected{% endif %}>{{ t|capitalize }}</option>{% endfor %}</select></div>
+      <div class="f"><label class="fl">Text</label><input type="text" name="status_text" value="{{ config.modules.status.text }}"></div>
+    </div>
+  </div>
+</div>
 
-      <div class="content-body">
+<!-- SETTINGS -->
+<div id="settings" class="page">
+  <div class="ph"><div class="pt">Settings</div><div class="ps">Global bot configuration.</div></div>
+  <div class="card">
+    <div class="ct" style="margin-bottom:12px;">Prefix</div>
+    <div class="f"><label class="fl">Command Prefix</label><input type="text" name="prefix" value="{{ config.prefix }}" style="max-width:100px;"></div>
+  </div>
+</div>
 
-        <!-- ===== OVERVIEW ===== -->
-        <div id="dash" class="page active">
-          <div class="page-header">
-            <h1>Overview</h1>
-            <p>Server configuration at a glance</p>
-          </div>
+<!-- WELCOME / LEAVE -->
+<div id="welcome" class="page">
+  <div class="ph"><div class="pt">Welcome & Leave</div><div class="ps">Messages for member joins and leaves.</div></div>
+  <div class="card">
+    <div class="ch"><div class="ct">Welcome Channel</div><label class="sw"><input type="checkbox" name="wc_enabled" value="True" {% if config.modules.welcome_channel.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <div class="g2">
+      <div class="f"><label class="fl">Channel</label><select name="wc_channel_id"><option value="">— Select —</option>{% for c in channels %}<option value="{{ c.id }}" {% if c.id|string==config.modules.welcome_channel.channel_id %}selected{% endif %}>#{{ c.name }}</option>{% endfor %}</select></div>
+      <div class="f"><label class="fl">Embed Color</label><input type="color" name="wc_embed_color" value="{{ config.modules.welcome_channel.embed_color }}"></div>
+    </div>
+    <div class="f"><label class="fl">Message — use {user} {server}</label><textarea name="wc_message">{{ config.modules.welcome_channel.message }}</textarea></div>
+    <div class="f"><label class="fl">Embed Title</label><input type="text" name="wc_embed_title" value="{{ config.modules.welcome_channel.embed_title }}"></div>
+    <div class="tr"><div class="ti"><div class="tl">Use Embed</div></div><label class="sw"><input type="checkbox" name="wc_embed" value="True" {% if config.modules.welcome_channel.embed=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <div class="tr"><div class="ti"><div class="tl">Show Member Count</div></div><label class="sw"><input type="checkbox" name="wc_member_count" value="True" {% if config.modules.welcome_channel.show_member_count=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+  </div>
+  <div class="card">
+    <div class="ch"><div class="ct">Leave Channel</div><label class="sw"><input type="checkbox" name="lc_enabled" value="True" {% if config.modules.leave_channel.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <div class="f"><label class="fl">Channel</label><select name="lc_channel_id"><option value="">— Select —</option>{% for c in channels %}<option value="{{ c.id }}" {% if c.id|string==config.modules.leave_channel.channel_id %}selected{% endif %}>#{{ c.name }}</option>{% endfor %}</select></div>
+    <div class="f"><label class="fl">Message — use {user} {server}</label><textarea name="lc_message">{{ config.modules.leave_channel.message }}</textarea></div>
+  </div>
+</div>
 
-          <div class="stats-grid">
-            <div class="stat-card">
-              <div class="stat-icon red"><i class="fas fa-shield-alt"></i></div>
-              <div>
-                <div class="stat-label">Link Filter</div>
-                <span class="badge {% if config.modules.link_filter.enabled == 'True' %}on{% else %}off{% endif %}">
-                  {% if config.modules.link_filter.enabled == 'True' %}Active{% else %}Inactive{% endif %}
-                </span>
-              </div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-icon amber"><i class="fas fa-gavel"></i></div>
-              <div>
-                <div class="stat-label">Moderation</div>
-                <span class="badge {% if config.modules.mod.enabled == 'True' %}on{% else %}off{% endif %}">
-                  {% if config.modules.mod.enabled == 'True' %}Active{% else %}Inactive{% endif %}
-                </span>
-              </div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-icon green"><i class="fas fa-envelope"></i></div>
-              <div>
-                <div class="stat-label">Welcome DM</div>
-                <span class="badge {% if config.modules.dms.welcome_enabled == 'True' %}on{% else %}off{% endif %}">
-                  {% if config.modules.dms.welcome_enabled == 'True' %}Active{% else %}Inactive{% endif %}
-                </span>
-              </div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-icon blue"><i class="fas fa-terminal"></i></div>
-              <div>
-                <div class="stat-label">Prefix</div>
-                <div class="stat-value" style="font-size:18px; font-family: monospace;">{{ config.prefix }}</div>
-              </div>
-            </div>
-          </div>
+<!-- AUTO-MOD -->
+<div id="automod" class="page">
+  <div class="ph"><div class="pt">Auto-Moderation</div><div class="ps">Automatically handle rule violations.</div></div>
+  <div class="card"><div class="tr"><div class="ti"><div class="tl">Enable Auto-Mod</div><div class="ts">Applies to all filters below</div></div><label class="sw"><input type="checkbox" name="am_enabled" value="True" {% if config.modules.auto_mod.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div></div>
+  <div class="card">
+    <div class="ct" style="margin-bottom:10px;">Word Blacklist</div>
+    <div class="tag-row"><input type="text" id="bl_in" placeholder="Add word..."><button type="button" class="btn-add" onclick="addTag('bl_in','bl_tags','am_blacklist')">Add</button></div>
+    <div class="tags" id="bl_tags">{% for w in config.modules.auto_mod.blacklist %}<div class="tag">{{ w }}<input type="hidden" name="am_blacklist" value="{{ w }}"><span class="tag-x" onclick="this.parentElement.remove()">✕</span></div>{% endfor %}</div>
+    <div class="f"><label class="fl">Action on Trigger</label><select name="am_blacklist_action"><option value="delete" {% if config.modules.auto_mod.blacklist_action=='delete' %}selected{% endif %}>Delete only</option><option value="warn" {% if config.modules.auto_mod.blacklist_action=='warn' %}selected{% endif %}>Delete + Warn</option></select></div>
+  </div>
+  <div class="card">
+    <div class="ct" style="margin-bottom:10px;">Filters</div>
+    <div class="tr"><div class="ti"><div class="tl">Caps Lock Filter</div><div class="ts">Block excessive caps</div></div><label class="sw"><input type="checkbox" name="am_caps_filter" value="True" {% if config.modules.auto_mod.caps_filter=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <div class="f" style="margin-top:11px;"><label class="fl">Caps Threshold (%)</label><input type="number" name="am_caps_threshold" value="{{ config.modules.auto_mod.caps_threshold }}" min="10" max="100" style="max-width:100px;"></div>
+    <hr class="dv">
+    <div class="tr"><div class="ti"><div class="tl">Anti-Spam Filter</div><div class="ts">Block rapid messages</div></div><label class="sw"><input type="checkbox" name="am_spam_filter" value="True" {% if config.modules.auto_mod.spam_filter=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <div class="g2" style="margin-top:11px;"><div class="f"><label class="fl">Max Messages</label><input type="number" name="am_spam_count" value="{{ config.modules.auto_mod.spam_count }}"></div><div class="f"><label class="fl">Per X Seconds</label><input type="number" name="am_spam_seconds" value="{{ config.modules.auto_mod.spam_seconds }}"></div></div>
+  </div>
+</div>
 
-          <div class="card">
-            <div class="card-title"><i class="fas fa-cubes"></i> Module Status</div>
-            <div class="module-grid">
-              <div class="module-card">
-                <div class="module-card-head">
-                  <div class="module-icon-wrap">
-                    <div class="module-icon"><i class="fas fa-shield-alt"></i></div>
-                    <div>
-                      <div class="module-name">Link Filter</div>
-                      <div class="module-desc">Block links in channels</div>
-                    </div>
-                  </div>
-                  <span class="badge {% if config.modules.link_filter.enabled == 'True' %}on{% else %}off{% endif %}">
-                    {% if config.modules.link_filter.enabled == 'True' %}On{% else %}Off{% endif %}
-                  </span>
-                </div>
-              </div>
-              <div class="module-card">
-                <div class="module-card-head">
-                  <div class="module-icon-wrap">
-                    <div class="module-icon"><i class="fas fa-gavel"></i></div>
-                    <div>
-                      <div class="module-name">Moderation</div>
-                      <div class="module-desc">Kick, ban &amp; timeout</div>
-                    </div>
-                  </div>
-                  <span class="badge {% if config.modules.mod.enabled == 'True' %}on{% else %}off{% endif %}">
-                    {% if config.modules.mod.enabled == 'True' %}On{% else %}Off{% endif %}
-                  </span>
-                </div>
-              </div>
-              <div class="module-card">
-                <div class="module-card-head">
-                  <div class="module-icon-wrap">
-                    <div class="module-icon"><i class="fas fa-question-circle"></i></div>
-                    <div>
-                      <div class="module-name">Help Command</div>
-                      <div class="module-desc">Custom help response</div>
-                    </div>
-                  </div>
-                  <span class="badge {% if config.modules.help.enabled == 'True' %}on{% else %}off{% endif %}">
-                    {% if config.modules.help.enabled == 'True' %}On{% else %}Off{% endif %}
-                  </span>
-                </div>
-              </div>
-              <div class="module-card">
-                <div class="module-card-head">
-                  <div class="module-icon-wrap">
-                    <div class="module-icon"><i class="fas fa-info-circle"></i></div>
-                    <div>
-                      <div class="module-name">Info Command</div>
-                      <div class="module-desc">Custom info response</div>
-                    </div>
-                  </div>
-                  <span class="badge {% if config.modules.info.enabled == 'True' %}on{% else %}off{% endif %}">
-                    {% if config.modules.info.enabled == 'True' %}On{% else %}Off{% endif %}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+<!-- LINK FILTER -->
+<div id="linkfilter" class="page">
+  <div class="ph"><div class="pt">Link Filter</div><div class="ps">Block links in selected channels.</div></div>
+  <div class="card">
+    <div class="tr"><div class="ti"><div class="tl">Enable Link Filter</div></div><label class="sw"><input type="checkbox" name="lf_enabled" value="True" {% if config.modules.link_filter.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <hr class="dv">
+    <div class="f"><label class="fl">Protected Channels</label><div class="sl-box">{% for c in channels %}<div class="ci"><input type="checkbox" name="lf_chans" value="{{ c.id }}" {% if c.id|string in config.modules.link_filter.chans %}checked{% endif %}>#{{ c.name }}</div>{% endfor %}</div></div>
+    <div class="f"><label class="fl">Bypass Roles</label><div class="sl-box">{% for r in roles %}<div class="ci"><input type="checkbox" name="lf_roles" value="{{ r.id }}" {% if r.id|string in config.modules.link_filter.roles %}checked{% endif %}>{{ r.name }}</div>{% endfor %}</div></div>
+  </div>
+</div>
 
-        <!-- ===== SETTINGS ===== -->
-        <div id="sett" class="page">
-          <div class="page-header">
-            <h1>Global Settings</h1>
-            <p>Bot prefix and status configuration</p>
-          </div>
-          <div class="card">
-            <div class="form-row">
-              <div class="form-field">
-                <label>Command Prefix</label>
-                <input type="text" name="prefix" value="{{ config.prefix }}" maxlength="5" placeholder="!">
-              </div>
-              <div class="form-field">
-                <label>Bot Status</label>
-                <input type="text" name="status" value="{{ config.status }}" placeholder="Lava Network">
-              </div>
-            </div>
-          </div>
-        </div>
+<!-- MODERATION -->
+<div id="mod" class="page">
+  <div class="ph"><div class="pt">Moderation</div><div class="ps">Commands: kick, ban, warn, mute, timeout, purge, slowmode.</div></div>
+  <div class="card">
+    <div class="tr"><div class="ti"><div class="tl">Enable Mod Commands</div></div><label class="sw"><input type="checkbox" name="m_enabled" value="True" {% if config.modules.mod.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <hr class="dv">
+    <div class="f"><label class="fl">Staff Roles</label><div class="sl-box">{% for r in roles %}<div class="ci"><input type="checkbox" name="mod_roles" value="{{ r.id }}" {% if r.id|string in config.modules.mod.roles %}checked{% endif %}>{{ r.name }}</div>{% endfor %}</div></div>
+  </div>
+</div>
 
-        <!-- ===== LINK FILTER ===== -->
-        <div id="links" class="page">
-          <div class="page-header">
-            <h1>Link Filter</h1>
-            <p>Block links in specified channels</p>
-          </div>
-          <div class="card">
-            <div class="card-title"><i class="fas fa-power-off"></i> Status</div>
-            <div class="toggle-wrap" style="margin-bottom:4px">
-              <label class="toggle">
-                <input type="checkbox" id="lf_toggle" onchange="syncToggle(this,'lf_enabled')" {% if config.modules.link_filter.enabled == 'True' %}checked{% endif %}>
-                <span class="toggle-slider"></span>
-              </label>
-              <input type="hidden" name="lf_enabled" id="lf_enabled" value="{{ config.modules.link_filter.enabled }}">
-              <label for="lf_toggle" style="font-size:14px; color:var(--text); font-weight:500;">Enable Link Filter</label>
-            </div>
-          </div>
+<!-- WARN SYSTEM -->
+<div id="warnsys" class="page">
+  <div class="ph"><div class="pt">Warn System</div><div class="ps">Auto-punish at warning thresholds.</div></div>
+  <div class="card">
+    <div class="tr"><div class="ti"><div class="tl">Enable Auto-Punishment</div></div><label class="sw"><input type="checkbox" name="ws_enabled" value="True" {% if config.modules.warn_system.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <hr class="dv">
+    <div class="g2" style="margin-top:12px;">
+      <div class="f"><label class="fl">Warns → Auto Kick (0 = off)</label><input type="number" name="ws_kick" value="{{ config.modules.warn_system.warn_threshold_kick }}" min="0"></div>
+      <div class="f"><label class="fl">Warns → Auto Ban (0 = off)</label><input type="number" name="ws_ban" value="{{ config.modules.warn_system.warn_threshold_ban }}" min="0"></div>
+    </div>
+  </div>
+</div>
 
-          <div class="form-row">
-            <div class="card" style="margin-bottom:0">
-              <div class="card-title"><i class="fas fa-hashtag"></i> Protected Channels</div>
-              <div class="check-list">
-                {% for c in channels %}
-                <label class="check-item">
-                  <input type="checkbox" name="lf_chans" value="{{ c.id }}" {% if c.id|string in config.modules.link_filter.chans %}checked{% endif %}>
-                  <span><i class="fas fa-hashtag item-icon"></i> {{ c.name }}</span>
-                </label>
-                {% else %}
-                <div class="empty-state"><i class="fas fa-hashtag"></i><p>No channels found</p></div>
-                {% endfor %}
-              </div>
-            </div>
-            <div class="card" style="margin-bottom:0">
-              <div class="card-title"><i class="fas fa-user-shield"></i> Bypass Roles</div>
-              <div class="check-list">
-                {% for r in roles %}
-                <label class="check-item">
-                  <input type="checkbox" name="lf_roles" value="{{ r.id }}" {% if r.id|string in config.modules.link_filter.roles %}checked{% endif %}>
-                  <span>{{ r.name }}</span>
-                </label>
-                {% else %}
-                <div class="empty-state"><i class="fas fa-users"></i><p>No roles found</p></div>
-                {% endfor %}
-              </div>
-            </div>
-          </div>
-        </div>
+<!-- TICKETS -->
+<div id="tickets" class="page">
+  <div class="ph"><div class="pt">Tickets</div><div class="ps">Configure categories, then use <span class="code">!setticket</span> to deploy.</div></div>
+  <div class="card">
+    <div class="tr"><div class="ti"><div class="tl">Enable Ticket System</div></div><label class="sw"><input type="checkbox" name="tc_enabled" value="True" {% if config.modules.tickets.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <hr class="dv">
+    <div class="f"><label class="fl">Global Support Role</label><select name="tc_support_role_id"><option value="">— Select Role —</option>{% for r in roles %}<option value="{{ r.id }}" {% if r.id|string==config.modules.tickets.support_role_id %}selected{% endif %}>{{ r.name }}</option>{% endfor %}</select></div>
+  </div>
+  {% for key, (def_emoji, def_label) in [('support',('🎫','Support')),('store',('🛒','Store')),('apply',('📋','Apply')),('report',('🚨','User Report')),('bug',('🐛','Bug Report'))] %}
+  {% set cat=config.modules.tickets.categories.get(key,{}) %}
+  <div class="card">
+    <div class="ch" style="margin-bottom:12px;">
+      <div style="display:flex;align-items:center;gap:8px;"><span style="font-size:16px;">{{ cat.get('emoji',def_emoji) }}</span><div class="ct" style="margin:0;">{{ def_label }}</div></div>
+      <label class="sw"><input type="checkbox" name="tc_{{ key }}_enabled" value="True" {% if cat.get('enabled','True')=="True" %}checked{% endif %}><span class="sl"></span></label>
+    </div>
+    <div class="g2">
+      <div class="f"><label class="fl">Label</label><input type="text" name="tc_{{ key }}_label" value="{{ cat.get('label',def_label) }}"></div>
+      <div class="f"><label class="fl">Emoji</label><input type="text" name="tc_{{ key }}_emoji" value="{{ cat.get('emoji',def_emoji) }}"></div>
+    </div>
+    <div class="f"><label class="fl">Description (shown in dropdown)</label><input type="text" name="tc_{{ key }}_desc" value="{{ cat.get('description','') }}"></div>
+    <div class="f"><label class="fl">Discord Category (where tickets open)</label><select name="tc_{{ key }}_category"><option value="">— No Category —</option>{% for c in categories %}<option value="{{ c.id }}" {% if c.id|string==cat.get('category_id','') %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select></div>
+  </div>
+  {% endfor %}
+</div>
 
-        <!-- ===== MODERATION ===== -->
-        <div id="mod" class="page">
-          <div class="page-header">
-            <h1>Moderation</h1>
-            <p>Kick, ban, and timeout commands</p>
-          </div>
-          <div class="card">
-            <div class="card-title"><i class="fas fa-power-off"></i> Status</div>
-            <div class="toggle-wrap">
-              <label class="toggle">
-                <input type="checkbox" id="m_toggle" onchange="syncToggle(this,'m_enabled')" {% if config.modules.mod.enabled == 'True' %}checked{% endif %}>
-                <span class="toggle-slider"></span>
-              </label>
-              <input type="hidden" name="m_enabled" id="m_enabled" value="{{ config.modules.mod.enabled }}">
-              <label for="m_toggle" style="font-size:14px; color:var(--text); font-weight:500;">Enable Moderation</label>
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-title"><i class="fas fa-users-cog"></i> Staff Roles</div>
-            <div class="check-list">
-              {% for r in roles %}
-              <label class="check-item">
-                <input type="checkbox" name="mod_roles" value="{{ r.id }}" {% if r.id|string in config.modules.mod.roles %}checked{% endif %}>
-                <span>{{ r.name }}</span>
-              </label>
-              {% else %}
-              <div class="empty-state"><i class="fas fa-users"></i><p>No roles found</p></div>
-              {% endfor %}
-            </div>
-          </div>
-        </div>
+<!-- COUNTING -->
+<div id="counting" class="page">
+  <div class="ph"><div class="pt">Counting</div><div class="ps">Members count up — wrong number or double-post resets to 0.</div></div>
+  <div class="card">
+    <div class="tr"><div class="ti"><div class="tl">Enable Counting</div></div><label class="sw"><input type="checkbox" name="count_enabled" value="True" {% if config.modules.counting.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <hr class="dv">
+    <div class="f"><label class="fl">Counting Channel</label><select name="count_channel_id"><option value="">— Select Channel —</option>{% for c in channels %}<option value="{{ c.id }}" {% if c.id|string==config.modules.counting.channel_id %}selected{% endif %}>#{{ c.name }}</option>{% endfor %}</select></div>
+    <p class="muted" style="font-size:12px;">Or use <span class="code">!setcounting</span> directly in the channel.</p>
+  </div>
+  <div class="card">
+    <div class="ct" style="margin-bottom:6px;">Current Count</div>
+    <div style="font-size:36px;font-weight:600;font-family:'DM Mono',monospace;color:var(--accent);">{{ current_count }}</div>
+    <div class="muted" style="font-size:12px;margin-top:4px;">Next expected: {{ current_count+1 }}</div>
+  </div>
+</div>
 
-        <!-- ===== DM SYSTEM ===== -->
-        <div id="dms" class="page">
-          <div class="page-header">
-            <h1>DM System</h1>
-            <p>Automated DM notifications for server events. Use <code style="background:var(--card);padding:2px 6px;border-radius:4px;">{server}</code> as a placeholder.</p>
-          </div>
+<!-- ROLES -->
+<div id="roles" class="page">
+  <div class="ph"><div class="pt">Auto Role</div><div class="ps">Assign a role to new members automatically.</div></div>
+  <div class="card">
+    <div class="tr"><div class="ti"><div class="tl">Enable Auto Role</div></div><label class="sw"><input type="checkbox" name="ar_enabled" value="True" {% if config.modules.auto_role.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <hr class="dv">
+    <div class="f"><label class="fl">Role to Assign</label><select name="ar_role_id"><option value="">— Select Role —</option>{% for r in roles %}<option value="{{ r.id }}" {% if r.id|string==config.modules.auto_role.role_id %}selected{% endif %}>{{ r.name }}</option>{% endfor %}</select></div>
+  </div>
+</div>
 
-          <div class="dm-block">
-            <div class="dm-block-head">
-              <div class="dm-block-title"><i class="fas fa-hand-wave"></i> Welcome Message</div>
-              <div class="toggle-wrap">
-                <label class="toggle">
-                  <input type="checkbox" id="dw_toggle" onchange="syncToggle(this,'dm_w_enabled')" {% if config.modules.dms.welcome_enabled == 'True' %}checked{% endif %}>
-                  <span class="toggle-slider"></span>
-                </label>
-                <input type="hidden" name="dm_w_enabled" id="dm_w_enabled" value="{{ config.modules.dms.welcome_enabled }}">
-              </div>
-            </div>
-            <div class="form-field" style="margin-bottom:0">
-              <label>Message Content</label>
-              <textarea name="dm_w_msg">{{ config.modules.dms.welcome_msg }}</textarea>
-            </div>
-          </div>
+<!-- LOGGING -->
+<div id="logging" class="page">
+  <div class="ph"><div class="pt">Logging</div><div class="ps">Log server activity to a channel.</div></div>
+  <div class="card">
+    <div class="tr"><div class="ti"><div class="tl">Enable Logging</div></div><label class="sw"><input type="checkbox" name="log_enabled" value="True" {% if config.modules.logging.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <hr class="dv">
+    <div class="f"><label class="fl">Log Channel</label><select name="log_channel_id"><option value="">— Select —</option>{% for c in channels %}<option value="{{ c.id }}" {% if c.id|string==config.modules.logging.channel_id %}selected{% endif %}>#{{ c.name }}</option>{% endfor %}</select></div>
+    <hr class="dv">
+    {% for k,lbl in [('log_deletes','Deleted Messages'),('log_edits','Edited Messages'),('log_joins','Member Joins'),('log_leaves','Member Leaves'),('log_bans','Bans'),('log_roles','Role Changes'),('log_mods','Mod Actions')] %}
+    <div class="tr"><div class="ti"><div class="tl">{{ lbl }}</div></div><label class="sw"><input type="checkbox" name="{{ k }}" value="True" {% if config.modules.logging[k]=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    {% endfor %}
+  </div>
+</div>
 
-          <div class="dm-block">
-            <div class="dm-block-head">
-              <div class="dm-block-title"><i class="fas fa-boot"></i> Kick Notification</div>
-              <div class="toggle-wrap">
-                <label class="toggle">
-                  <input type="checkbox" id="dk_toggle" onchange="syncToggle(this,'dm_k_enabled')" {% if config.modules.dms.kick_enabled == 'True' %}checked{% endif %}>
-                  <span class="toggle-slider"></span>
-                </label>
-                <input type="hidden" name="dm_k_enabled" id="dm_k_enabled" value="{{ config.modules.dms.kick_enabled }}">
-              </div>
-            </div>
-            <div class="form-field" style="margin-bottom:0">
-              <label>Message Content</label>
-              <textarea name="dm_k_msg">{{ config.modules.dms.kick_msg }}</textarea>
-            </div>
-          </div>
+<!-- GIVEAWAY -->
+<div id="giveaway" class="page">
+  <div class="ph"><div class="pt">Giveaway</div><div class="ps">Use <span class="code">!giveaway 30m Prize Name</span> to start.</div></div>
+  <div class="card">
+    <div class="tr"><div class="ti"><div class="tl">Enable Giveaway Command</div></div><label class="sw"><input type="checkbox" name="ga_enabled" value="True" {% if config.modules.giveaway.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <hr class="dv">
+    <p class="muted" style="font-size:12px;">Duration units: <span class="code">s</span> <span class="code">m</span> <span class="code">h</span> <span class="code">d</span></p>
+  </div>
+</div>
 
-          <div class="dm-block">
-            <div class="dm-block-head">
-              <div class="dm-block-title"><i class="fas fa-ban"></i> Ban Notification</div>
-              <div class="toggle-wrap">
-                <label class="toggle">
-                  <input type="checkbox" id="db_toggle" onchange="syncToggle(this,'dm_b_enabled')" {% if config.modules.dms.ban_enabled == 'True' %}checked{% endif %}>
-                  <span class="toggle-slider"></span>
-                </label>
-                <input type="hidden" name="dm_b_enabled" id="dm_b_enabled" value="{{ config.modules.dms.ban_enabled }}">
-              </div>
-            </div>
-            <div class="form-field" style="margin-bottom:0">
-              <label>Message Content</label>
-              <textarea name="dm_b_msg">{{ config.modules.dms.ban_msg }}</textarea>
-            </div>
-          </div>
-        </div>
+<!-- DM NOTIFICATIONS -->
+<div id="dms" class="page">
+  <div class="ph"><div class="pt">DM Notifications</div><div class="ps">Placeholders: <span class="code">{server}</span> <span class="code">{reason}</span></div></div>
+  {% for pfx,key,lbl in [('dm_w','welcome','Welcome'),('dm_k','kick','Kick'),('dm_b','ban','Ban'),('dm_t','timeout','Timeout'),('dm_warn','warn','Warning'),('dm_ub','unban','Unban'),('dm_m','mute','Mute')] %}
+  <div class="card">
+    <div class="ch" style="margin-bottom:11px;"><div class="ct" style="margin:0;">{{ lbl }} DM</div><label class="sw"><input type="checkbox" name="{{ pfx }}_enabled" value="True" {% if config.modules.dms[key+'_enabled']=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <div class="f"><label class="fl">Message</label><textarea name="{{ pfx }}_msg">{{ config.modules.dms[key+'_msg'] }}</textarea></div>
+  </div>
+  {% endfor %}
+</div>
 
-        <!-- ===== HELP ===== -->
-        <div id="help" class="page">
-          <div class="page-header">
-            <h1>Help Command</h1>
-            <p>Configure the custom help response message</p>
-          </div>
-          <div class="card">
-            <div class="toggle-wrap" style="margin-bottom:20px">
-              <label class="toggle">
-                <input type="checkbox" id="h_toggle" onchange="syncToggle(this,'h_enabled')" {% if config.modules.help.enabled == 'True' %}checked{% endif %}>
-                <span class="toggle-slider"></span>
-              </label>
-              <input type="hidden" name="h_enabled" id="h_enabled" value="{{ config.modules.help.enabled }}">
-              <label for="h_toggle" style="font-size:14px; color:var(--text); font-weight:500;">Enable Help Command</label>
-            </div>
-            <div class="form-field">
-              <label>Command Aliases <span style="color:var(--muted);font-size:11px">(comma-separated)</span></label>
-              <input type="text" name="h_aliases" value="{{ config.modules.help.aliases }}" placeholder="help, h">
-            </div>
-            <div class="form-field" style="margin-bottom:0">
-              <label>Response Text</label>
-              <textarea name="h_text">{{ config.modules.help.text }}</textarea>
-            </div>
-          </div>
-        </div>
+<!-- HELP / INFO -->
+<div id="helpinfo" class="page">
+  <div class="ph"><div class="pt">Help & Info</div><div class="ps">Static response commands.</div></div>
+  <div class="card">
+    <div class="ch" style="margin-bottom:12px;"><div class="ct" style="margin:0;">Help Module</div><label class="sw"><input type="checkbox" name="h_enabled" value="True" {% if config.modules.help.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <div class="f"><label class="fl">Aliases (comma-separated)</label><input type="text" name="h_aliases" value="{{ config.modules.help.aliases }}"></div>
+    <div class="f"><label class="fl">Response</label><textarea name="h_text">{{ config.modules.help.text }}</textarea></div>
+  </div>
+  <div class="card">
+    <div class="ch" style="margin-bottom:12px;"><div class="ct" style="margin:0;">Info Module</div><label class="sw"><input type="checkbox" name="i_enabled" value="True" {% if config.modules.info.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <div class="f"><label class="fl">Aliases (comma-separated)</label><input type="text" name="i_aliases" value="{{ config.modules.info.aliases }}"></div>
+    <div class="f"><label class="fl">Response</label><textarea name="i_text">{{ config.modules.info.text }}</textarea></div>
+  </div>
+</div>
 
-        <!-- ===== INFO ===== -->
-        <div id="info" class="page">
-          <div class="page-header">
-            <h1>Info Command</h1>
-            <p>Configure the custom info response message</p>
-          </div>
-          <div class="card">
-            <div class="toggle-wrap" style="margin-bottom:20px">
-              <label class="toggle">
-                <input type="checkbox" id="i_toggle" onchange="syncToggle(this,'i_enabled')" {% if config.modules.info.enabled == 'True' %}checked{% endif %}>
-                <span class="toggle-slider"></span>
-              </label>
-              <input type="hidden" name="i_enabled" id="i_enabled" value="{{ config.modules.info.enabled }}">
-              <label for="i_toggle" style="font-size:14px; color:var(--text); font-weight:500;">Enable Info Command</label>
-            </div>
-            <div class="form-field">
-              <label>Command Aliases <span style="color:var(--muted);font-size:11px">(comma-separated)</span></label>
-              <input type="text" name="i_aliases" value="{{ config.modules.info.aliases }}" placeholder="info, i">
-            </div>
-            <div class="form-field" style="margin-bottom:0">
-              <label>Response Text</label>
-              <textarea name="i_text">{{ config.modules.info.text }}</textarea>
-            </div>
-          </div>
-        </div>
+<!-- FONT CREATOR -->
+<div id="fonts" class="page">
+  <div class="ph"><div class="pt">Font Creator</div><div class="ps">Type text and copy it in any Unicode style for Discord.</div></div>
+  <div class="card">
+    <div class="f"><label class="fl">Input Text</label><input type="text" id="fi" placeholder="Type something..." oninput="uf(this.value)" autocomplete="off"></div>
+    <div class="fgrid" id="fgrid">
+      {% for fid,flbl in [('f_gothic','Gothic'),('f_fancy','Fancy / Cursive'),('f_smallcaps','Small Caps'),('f_bold','Bold Serif'),('f_italic','Italic'),('f_double','Double Struck'),('f_mono','Monospace'),('f_circle','Circled')] %}
+      <div class="fcard"><div class="flabel">{{ flbl }}</div><div class="ftext" id="{{ fid }}"></div><button type="button" class="cpbtn" onclick="cf('{{ fid }}',this)"><i class="fas fa-copy"></i> Copy</button></div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
 
-        <!-- ===== CHANNEL CREATOR ===== -->
-        <div id="creator" class="page">
-          <div class="page-header">
-            <h1>Channel Creator</h1>
-            <p>Create text channels with stylized fonts</p>
-          </div>
-          <div class="card">
-            <div class="form-row">
-              <div class="form-field">
-                <label>Channel Name</label>
-                <input type="text" name="c_name" id="c_name_input" placeholder="general" oninput="updatePreview()">
-              </div>
-              <div class="form-field">
-                <label>Category ID <span style="color:var(--muted);font-size:11px">(optional)</span></label>
-                <input type="text" name="c_cat" placeholder="1234567890">
-              </div>
-            </div>
-            <div class="form-field">
-              <label>Font Style</label>
-              <select name="c_font" id="c_font_select" onchange="updatePreview()">
-                <option value="normal">Normal</option>
-                <option value="gothic">Gothic (𝔤𝔬𝔱𝔥𝔦𝔠)</option>
-                <option value="fancy">Fancy (𝓯𝓪𝓷𝓬𝔂)</option>
-                <option value="smallcaps">Small Caps (ꜱᴍᴀʟʟ)</option>
-              </select>
-            </div>
-            <div class="form-field">
-              <label>Preview</label>
-              <div class="font-preview" id="font_preview"># channel-name</div>
-            </div>
-            <button type="submit" name="action" value="create_chan" class="btn-secondary">
-              <i class="fas fa-plus"></i> Create Channel
-            </button>
-          </div>
-        </div>
+<!-- MOD CASES -->
+<div id="cases" class="page">
+  <div class="ph"><div class="pt">Mod Cases</div><div class="ps">Recent moderation actions.</div></div>
+  <div class="card">
+    {% if mod_cases %}
+    <table class="tbl">
+      <thead><tr><th>#</th><th>Action</th><th>Target</th><th>Mod</th><th>Reason</th><th>Date</th></tr></thead>
+      <tbody>
+      {% for c in mod_cases %}
+      <tr>
+        <td style="font-family:'DM Mono',monospace;color:var(--text3)">{{ c.case }}</td>
+        <td><span class="pill {% if c.action=='BAN' %}pb{% elif c.action=='KICK' %}pk{% elif c.action=='WARN' %}pw{% else %}po{% endif %}">{{ c.action }}</span></td>
+        <td>{{ c.target }}</td>
+        <td class="muted">{{ c.mod }}</td>
+        <td class="muted">{{ c.reason }}</td>
+        <td style="font-family:'DM Mono',monospace;font-size:11px;color:var(--text3)">{{ c.timestamp[:10] }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div style="text-align:center;padding:30px;color:var(--text3);">No mod cases yet.</div>
+    {% endif %}
+  </div>
+</div>
 
-      </div><!-- end content-body -->
-
-      <div class="save-bar">
-        <p>Changes apply immediately after saving</p>
-        <button type="submit" class="btn-save"><i class="fas fa-save"></i> Save Configuration</button>
-      </div>
-
-    </form>
-  </div><!-- end content-wrap -->
-</div><!-- end layout -->
-
-<div id="toast"><i class="fas fa-check-circle"></i> Configuration saved successfully</div>
-
+<div class="savebar">
+  <span class="save-hint">Changes apply instantly.</span>
+  <button type="submit" class="btn-save">Save Changes</button>
+</div>
+</form>
+</div>
+</div>
 {% endif %}
 
 <script>
-  // Page navigation
-  function showPage(id, btn) {
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
-    document.getElementById(id).classList.add('active');
-    if (btn) btn.classList.add('active');
-  }
+function sp(id,btn){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nb').forEach(b=>b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  btn.classList.add('active');
+}
 
-  // Toggle switch syncs to hidden input
-  function syncToggle(checkbox, hiddenId) {
-    document.getElementById(hiddenId).value = checkbox.checked ? 'True' : 'False';
-  }
+function addTag(inp,cont,name){
+  const i=document.getElementById(inp),w=i.value.trim();
+  if(!w)return;
+  const c=document.getElementById(cont),t=document.createElement('div');
+  t.className='tag';
+  t.innerHTML=`${w}<input type="hidden" name="${name}" value="${w}"><span class="tag-x" onclick="this.parentElement.remove()">✕</span>`;
+  c.appendChild(t);i.value='';
+}
+document.getElementById('bl_in')?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addTag('bl_in','bl_tags','am_blacklist');}});
 
-  // Font preview
-  const FONTS = {
-    normal: s => s,
-    gothic: s => s.split('').map(c => {
-      const idx = 'abcdefghijklmnopqrstuvwxyz'.indexOf(c);
-      return idx >= 0 ? '𝔞𝔟𝔠𝔡𝔢𝔣𝔤𝔥𝔦𝔧𝔨𝔩𝔪𝔫𝔬𝔭𝔮𝔯𝔰𝔱𝔲𝔳𝔴𝔵𝔶𝔷'[idx] : c;
-    }).join(''),
-    fancy: s => s.split('').map(c => {
-      const idx = 'abcdefghijklmnopqrstuvwxyz'.indexOf(c);
-      return idx >= 0 ? '𝓪𝓫𝓬𝓭𝓮𝓯𝓰𝓱𝓲𝓳𝓴𝓵𝓶𝓷𝓸𝓹𝓺𝓻𝓼𝓽𝓾𝓿𝔀𝔁𝔂𝔃'[idx] : c;
-    }).join(''),
-    smallcaps: s => s.split('').map(c => {
-      const idx = 'abcdefghijklmnopqrstuvwxyz'.indexOf(c);
-      return idx >= 0 ? 'ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘqʀꜱᴛᴜᴠᴡxʏᴢ'[idx] : c;
-    }).join('')
-  };
-
-  function updatePreview() {
-    const raw = (document.getElementById('c_name_input').value || 'channel-name').toLowerCase().replace(/ /g, '-');
-    const font = document.getElementById('c_font_select').value;
-    const transformed = FONTS[font] ? FONTS[font](raw) : raw;
-    document.getElementById('font_preview').textContent = '# ' + transformed;
-  }
-
-  // Toast on save
-  {% if request.method == 'POST' and session.guild_id %}
-  window.addEventListener('DOMContentLoaded', () => {
-    const t = document.getElementById('toast');
-    if (t) {
-      t.classList.add('show');
-      setTimeout(() => t.classList.remove('show'), 3000);
-    }
-  });
-  {% endif %}
+const F={
+  gothic:   {f:'abcdefghijklmnopqrstuvwxyz',t:'𝔞𝔟𝔠𝔡𝔢𝔣𝔤𝔥𝔦𝔧𝔨𝔩𝔪𝔫𝔬𝔭𝔮𝔯𝔰𝔱𝔲𝔳𝔴𝔵𝔶𝔷'},
+  fancy:    {f:'abcdefghijklmnopqrstuvwxyz',t:'𝓪𝓫𝓬𝓭𝓮𝓯𝓰𝓱𝓲𝓳𝓴𝓵𝓶𝓷𝓸𝓹𝓺𝓻𝓼𝓽𝓾𝓿𝔀𝔁𝔂𝔃'},
+  smallcaps:{f:'abcdefghijklmnopqrstuvwxyz',t:'ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘqʀꜱᴛᴜᴠᴡxʏᴢ'},
+  bold:     {f:'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',t:'𝐚𝐛𝐜𝐝𝐞𝐟𝐠𝐡𝐢𝐣𝐤𝐥𝐦𝐧𝐨𝐩𝐪𝐫𝐬𝐭𝐮𝐯𝐰𝐱𝐲𝐳𝐀𝐁𝐂𝐃𝐄𝐅𝐆𝐇𝐈𝐉𝐊𝐋𝐌𝐍𝐎𝐏𝐐𝐑𝐒𝐓𝐔𝐕𝐖𝐗𝐘𝐙𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗'},
+  italic:   {f:'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',t:'𝘢𝘣𝘤𝘥𝘦𝘧𝘨𝘩𝘪𝘫𝘬𝘭𝘮𝘯𝘰𝘱𝘲𝘳𝘴𝘵𝘶𝘷𝘸𝘹𝘺𝘻𝘈𝘉𝘊𝘋𝘌𝘍𝘎𝘏𝘐𝘑𝘒𝘓𝘔𝘕𝘖𝘗𝘘𝘙𝘚𝘛𝘜𝘝𝘞𝘟𝘠𝘡'},
+  double:   {f:'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',t:'𝕒𝕓𝕔𝕕𝕖𝕗𝕘𝕙𝕚𝕛𝕜𝕝𝕞𝕟𝕠𝕡𝕢𝕣𝕤𝕥𝕦𝕧𝕨𝕩𝕪𝕫𝔸𝔹ℂ𝔻𝔼𝔽𝔾ℍ𝕀𝕁𝕂𝕃𝕄ℕ𝕆ℙℚℝ𝕊𝕋𝕌𝕍𝕎𝕏𝕐ℤ𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡'},
+  mono:     {f:'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',t:'𝚊𝚋𝚌𝚍𝚎𝚏𝚐𝚑𝚒𝚓𝚔𝚕𝚖𝚗𝚘𝚙𝚚𝚛𝚜𝚝𝚞𝚟𝚠𝚡𝚢𝚣𝙰𝙱𝙲𝙳𝙴𝙵𝙶𝙷𝙸𝙹𝙺𝙻𝙼𝙽𝙾𝙿𝚀𝚁𝚂𝚃𝚄𝚅𝚆𝚇𝚈𝚉𝟶𝟷𝟸𝟹𝟺𝟻𝟼𝟽𝟾𝟿'},
+  circle:   {f:'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',t:'ⓐⓑⓒⓓⓔⓕⓖⓗⓘⓙⓚⓛⓜⓝⓞⓟⓠⓡⓢⓣⓤⓥⓦⓧⓨⓩⒶⒷⒸⒹⒺⒻⒼⒽⒾⒿⓀⓁⓂⓃⓄⓅⓆⓇⓈⓉⓊⓋⓌⓍⓎⓏ①②③④⑤⑥⑦⑧⑨'}
+};
+function conv(text,fn){
+  const {f,t}=F[fn];const fa=[...f];const ta=[...t];
+  return[...text].map(c=>{const i=fa.indexOf(c);return i>=0?ta[i]:c;}).join('');
+}
+function uf(v){
+  const map={f_gothic:'gothic',f_fancy:'fancy',f_smallcaps:'smallcaps',f_bold:'bold',f_italic:'italic',f_double:'double',f_mono:'mono',f_circle:'circle'};
+  for(const[id,fn]of Object.entries(map)){const el=document.getElementById(id);if(el)el.textContent=conv(v,fn);}
+}
+async function cf(id,btn){
+  const t=document.getElementById(id)?.textContent;if(!t)return;
+  await navigator.clipboard.writeText(t);
+  btn.classList.add('ok');btn.innerHTML='<i class="fas fa-check"></i> Copied!';
+  setTimeout(()=>{btn.classList.remove('ok');btn.innerHTML='<i class="fas fa-copy"></i> Copy';},2000);
+}
 </script>
 </body>
 </html>
 """
 
-# --- WEB ROUTES ---
-@app.route("/", methods=["GET", "POST"])
+@app.route("/", methods=["GET","POST"])
 def index():
+    login_error = False
     if request.method == "POST":
-        if "pw" in request.form and request.form.get("pw") == "10":
-            session['user'] = request.form.get("user")
-            return redirect("/")
-
+        if "pw" in request.form:
+            if request.form.get("pw") == os.environ.get("DASHBOARD_PASSWORD","10"):
+                session['user'] = request.form.get("user"); return redirect("/")
+            else: login_error = True
         action = request.form.get("action")
-        if action == "create_chan" and 'guild_id' in session:
-            name = format_font(request.form.get("c_name", ""), request.form.get("c_font", "normal"))
-            cat_id = request.form.get("c_cat", "")
-            async def run_c():
-                g = bot.get_guild(int(session['guild_id']))
-                cat = g.get_channel(int(cat_id)) if cat_id and cat_id.isdigit() else None
-                await g.create_text_channel(name, category=cat)
-            asyncio.run_coroutine_threadsafe(run_c(), bot.loop)
-            return redirect("/")
-
         if action == "save" and 'guild_id' in session:
+            def cb(v): return "True" if v else "False"
+            gid = session['guild_id']
             updates = {
-                "prefix": request.form.get("prefix"),
-                "status": request.form.get("status"),
-                "modules.mod.enabled": request.form.get("m_enabled"),
-                "modules.mod.roles": request.form.getlist("mod_roles"),
-                "modules.link_filter.enabled": request.form.get("lf_enabled"),
-                "modules.link_filter.chans": request.form.getlist("lf_chans"),
-                "modules.link_filter.roles": request.form.getlist("lf_roles"),
-                "modules.help.enabled": request.form.get("h_enabled"),
-                "modules.help.aliases": request.form.get("h_aliases"),
-                "modules.help.text": request.form.get("h_text"),
-                "modules.info.enabled": request.form.get("i_enabled"),
-                "modules.info.aliases": request.form.get("i_aliases"),
-                "modules.info.text": request.form.get("i_text"),
-                "modules.dms.welcome_enabled": request.form.get("dm_w_enabled"),
-                "modules.dms.welcome_msg": request.form.get("dm_w_msg"),
-                "modules.dms.kick_enabled": request.form.get("dm_k_enabled"),
-                "modules.dms.kick_msg": request.form.get("dm_k_msg"),
-                "modules.dms.ban_enabled": request.form.get("dm_b_enabled"),
-                "modules.dms.ban_msg": request.form.get("dm_b_msg"),
+                "prefix": request.form.get("prefix"), "bot_name": request.form.get("bot_name"), "accent_color": request.form.get("accent_color"),
+                "modules.status.type": request.form.get("status_type"), "modules.status.text": request.form.get("status_text"),
+                "modules.welcome_channel.enabled": cb(request.form.get("wc_enabled")), "modules.welcome_channel.channel_id": request.form.get("wc_channel_id",""),
+                "modules.welcome_channel.message": request.form.get("wc_message"), "modules.welcome_channel.embed": cb(request.form.get("wc_embed")),
+                "modules.welcome_channel.embed_title": request.form.get("wc_embed_title"), "modules.welcome_channel.embed_color": request.form.get("wc_embed_color"),
+                "modules.welcome_channel.show_member_count": cb(request.form.get("wc_member_count")),
+                "modules.leave_channel.enabled": cb(request.form.get("lc_enabled")), "modules.leave_channel.channel_id": request.form.get("lc_channel_id",""),
+                "modules.leave_channel.message": request.form.get("lc_message"),
+                "modules.link_filter.enabled": cb(request.form.get("lf_enabled")), "modules.link_filter.chans": request.form.getlist("lf_chans"), "modules.link_filter.roles": request.form.getlist("lf_roles"),
+                "modules.auto_mod.enabled": cb(request.form.get("am_enabled")), "modules.auto_mod.blacklist": request.form.getlist("am_blacklist"),
+                "modules.auto_mod.blacklist_action": request.form.get("am_blacklist_action"), "modules.auto_mod.caps_filter": cb(request.form.get("am_caps_filter")),
+                "modules.auto_mod.caps_threshold": request.form.get("am_caps_threshold"), "modules.auto_mod.spam_filter": cb(request.form.get("am_spam_filter")),
+                "modules.auto_mod.spam_count": request.form.get("am_spam_count"), "modules.auto_mod.spam_seconds": request.form.get("am_spam_seconds"),
+                "modules.mod.enabled": cb(request.form.get("m_enabled")), "modules.mod.roles": request.form.getlist("mod_roles"),
+                "modules.warn_system.enabled": cb(request.form.get("ws_enabled")), "modules.warn_system.warn_threshold_kick": request.form.get("ws_kick"), "modules.warn_system.warn_threshold_ban": request.form.get("ws_ban"),
+                "modules.logging.enabled": cb(request.form.get("log_enabled")), "modules.logging.channel_id": request.form.get("log_channel_id",""),
+                "modules.logging.log_deletes": cb(request.form.get("log_deletes")), "modules.logging.log_edits": cb(request.form.get("log_edits")),
+                "modules.logging.log_joins": cb(request.form.get("log_joins")), "modules.logging.log_leaves": cb(request.form.get("log_leaves")),
+                "modules.logging.log_bans": cb(request.form.get("log_bans")), "modules.logging.log_roles": cb(request.form.get("log_roles")), "modules.logging.log_mods": cb(request.form.get("log_mods")),
+                "modules.tickets.enabled": cb(request.form.get("tc_enabled")), "modules.tickets.support_role_id": request.form.get("tc_support_role_id",""),
+                "modules.auto_role.enabled": cb(request.form.get("ar_enabled")), "modules.auto_role.role_id": request.form.get("ar_role_id",""),
+                "modules.counting.enabled": cb(request.form.get("count_enabled")), "modules.counting.channel_id": request.form.get("count_channel_id",""),
+                "modules.giveaway.enabled": cb(request.form.get("ga_enabled")),
+                "modules.dms.welcome_enabled": cb(request.form.get("dm_w_enabled")), "modules.dms.welcome_msg": request.form.get("dm_w_msg"),
+                "modules.dms.kick_enabled": cb(request.form.get("dm_k_enabled")), "modules.dms.kick_msg": request.form.get("dm_k_msg"),
+                "modules.dms.ban_enabled": cb(request.form.get("dm_b_enabled")), "modules.dms.ban_msg": request.form.get("dm_b_msg"),
+                "modules.dms.timeout_enabled": cb(request.form.get("dm_t_enabled")), "modules.dms.timeout_msg": request.form.get("dm_t_msg"),
+                "modules.dms.warn_enabled": cb(request.form.get("dm_warn_enabled")), "modules.dms.warn_msg": request.form.get("dm_warn_msg"),
+                "modules.dms.unban_enabled": cb(request.form.get("dm_ub_enabled")), "modules.dms.unban_msg": request.form.get("dm_ub_msg"),
+                "modules.dms.mute_enabled": cb(request.form.get("dm_m_enabled")), "modules.dms.mute_msg": request.form.get("dm_m_msg"),
+                "modules.help.enabled": cb(request.form.get("h_enabled")), "modules.help.aliases": request.form.get("h_aliases"), "modules.help.text": request.form.get("h_text"),
+                "modules.info.enabled": cb(request.form.get("i_enabled")), "modules.info.aliases": request.form.get("i_aliases"), "modules.info.text": request.form.get("i_text"),
             }
-            config_col.update_one({"guild_id": session['guild_id']}, {"$set": updates})
+            for key in ['support','store','apply','report','bug']:
+                updates[f"modules.tickets.categories.{key}.enabled"] = cb(request.form.get(f"tc_{key}_enabled"))
+                updates[f"modules.tickets.categories.{key}.label"] = request.form.get(f"tc_{key}_label","")
+                updates[f"modules.tickets.categories.{key}.emoji"] = request.form.get(f"tc_{key}_emoji","")
+                updates[f"modules.tickets.categories.{key}.description"] = request.form.get(f"tc_{key}_desc","")
+                updates[f"modules.tickets.categories.{key}.category_id"] = request.form.get(f"tc_{key}_category","")
+            config_col.update_one({"guild_id": gid}, {"$set": updates})
+            async def us(): await _set_status(request.form.get("status_type","playing"), request.form.get("status_text","Lava Network"))
+            asyncio.run_coroutine_threadsafe(us(), bot.loop)
             return redirect("/")
 
     guilds = [{"name": g.name, "id": str(g.id)} for g in bot.guilds]
-    conf, roles, channels, guild_name = None, [], [], ""
+    conf = roles = channels = categories = None
+    guild_name = ""; member_count = total_warns = total_cases = current_count = 0
+    mod_cases = []; bot_name = "LAVA"; accent_color = "#ff3333"
+
     if 'guild_id' in session:
         conf = get_guild_config(session['guild_id'])
+        bot_name = conf.get('bot_name','LAVA'); accent_color = conf.get('accent_color','#ff3333')
         g = bot.get_guild(int(session['guild_id']))
         if g:
-            guild_name = g.name
-            roles = [{"id": r.id, "name": r.name} for r in g.roles if not r.managed and r.name != "@everyone"]
-            channels = [{"id": c.id, "name": c.name} for c in g.text_channels]
-    return render_template_string(HTML_TEMPLATE, config=conf, guilds=guilds, roles=roles, channels=channels, guild_name=guild_name)
+            guild_name = g.name; member_count = g.member_count
+            roles = [{"id": r.id,"name": r.name} for r in g.roles if not r.managed and r.name!="@everyone"]
+            channels = [{"id": c.id,"name": c.name} for c in g.text_channels]
+            categories = [{"id": c.id,"name": c.name} for c in g.categories]
+        total_warns = warns_col.count_documents({"guild_id": session['guild_id']})
+        total_cases = cases_col.count_documents({"guild_id": session['guild_id']})
+        mod_cases = list(cases_col.find({"guild_id": session['guild_id']}).sort("case",-1).limit(30))
+        cd = counting_col.find_one({"guild_id": session['guild_id']})
+        current_count = cd.get('count',0) if cd else 0
+
+    return render_template_string(HTML, config=conf, guilds=guilds, roles=roles or [], channels=channels or [],
+        categories=categories or [], guild_name=guild_name, bot_name=bot_name, accent_color=accent_color,
+        member_count=member_count, total_warns=total_warns, total_cases=total_cases,
+        mod_cases=mod_cases, current_count=current_count, login_error=login_error)
 
 @app.route("/select/<guild_id>")
-def select_guild(guild_id):
-    session['guild_id'] = guild_id
-    return redirect("/")
+def select_guild(guild_id): session['guild_id']=guild_id; return redirect("/")
 
 @app.route("/change_server")
-def change_server():
-    session.pop('guild_id', None)
-    return redirect("/")
+def change_server(): session.pop('guild_id',None); return redirect("/")
 
 @app.route("/logout")
-def logout():
-    session.clear()
-    return redirect("/")
+def logout(): session.clear(); return redirect("/")
 
-def run():
-    app.run(host="0.0.0.0", port=10000)
-
+def run(): app.run(host="0.0.0.0", port=10000)
 threading.Thread(target=run).start()
 bot.run(os.environ.get('DISCORD_TOKEN'))
