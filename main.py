@@ -61,7 +61,7 @@ def get_guild_config(guild_id):
                 "store": {"enabled": "True", "label": "Store", "emoji": "🛒", "category_id": "", "description": "Purchase help"},
                 "apply": {"enabled": "True", "label": "Apply", "emoji": "📋", "category_id": "", "description": "Staff applications"},
                 "report": {"enabled": "True", "label": "User Report", "emoji": "🚨", "category_id": "", "description": "Report a user"},
-                "bug": {"enabled": "True", "label": "Bug Report", "emoji": "🐛", "category_id": "", "description": "Report a bug"}
+                "bug": {"enabled": "True", "label": "Bug Report", "emoji": "🐛", "category_id": "", "description": "Report a bug"},
                 "beta": {"enabled": "True", "label": "Beta tester", "emoji": "🌋", "category_id": "", "description": "Apply for Beta Tester"}
             }
         },
