@@ -335,9 +335,9 @@ async def kick(ctx, member: discord.Member, *, reason=None):
     if dmc.get("kick_enabled") == "True": await send_user_dm(member, dmc["kick_msg"], ctx.guild.name)
     await member.kick(reason=reason)
     case = await add_mod_case(ctx.guild.id, "KICK", ctx.author, member, reason)
-    await ctx.send(f"👢 **{member}** kicked. Case #{case}")
+    await ctx.send(f"🌋 **{member}** kicked. Case #{case}")
     if conf['modules'].get('logging', {}).get('log_mods') == "True":
-        await log_action(ctx.guild, conf, f"👢 **{member}** kicked by **{ctx.author}**\nReason: {reason}", 0xff6600)
+        await log_action(ctx.guild, conf, f"🌋 **{member}** kicked by **{ctx.author}**\nReason: {reason}", 0xff6600)
 
 @bot.command()
 async def ban(ctx, member: discord.Member, *, reason=None):
@@ -347,9 +347,9 @@ async def ban(ctx, member: discord.Member, *, reason=None):
     if dmc.get("ban_enabled") == "True": await send_user_dm(member, dmc["ban_msg"], ctx.guild.name)
     await member.ban(reason=reason)
     case = await add_mod_case(ctx.guild.id, "BAN", ctx.author, member, reason)
-    await ctx.send(f"🔨 **{member}** banned. Case #{case}")
+    await ctx.send(f"🌋 **{member}** banned. Case #{case}")
     if conf['modules'].get('logging', {}).get('log_mods') == "True":
-        await log_action(ctx.guild, conf, f"🔨 **{member}** banned by **{ctx.author}**\nReason: {reason}", 0xff0000)
+        await log_action(ctx.guild, conf, f"🌋 **{member}** banned by **{ctx.author}**\nReason: {reason}", 0xff0000)
 
 @bot.command()
 async def unban(ctx, user_id: int, *, reason=None):
@@ -371,7 +371,7 @@ async def timeout(ctx, member: discord.Member, minutes: int, *, reason=None):
     if dmc.get("timeout_enabled") == "True": await send_user_dm(member, dmc["timeout_msg"], ctx.guild.name)
     await member.timeout(timedelta(minutes=minutes), reason=reason)
     case = await add_mod_case(ctx.guild.id, f"TIMEOUT {minutes}m", ctx.author, member, reason)
-    await ctx.send(f"⏰ **{member}** timed out {minutes}m. Case #{case}")
+    await ctx.send(f"🌋 **{member}** timed out {minutes}m. Case #{case}")
 
 @bot.command()
 async def mute(ctx, member: discord.Member, *, reason=None):
@@ -386,14 +386,14 @@ async def mute(ctx, member: discord.Member, *, reason=None):
     await member.add_roles(role, reason=reason)
     dmc = conf['modules']['dms']
     if dmc.get("mute_enabled") == "True": await send_user_dm(member, dmc["mute_msg"], ctx.guild.name)
-    await ctx.send(f"🔇 **{member}** muted.")
+    await ctx.send(f"🌋 **{member}** muted.")
 
 @bot.command()
 async def unmute(ctx, member: discord.Member):
     role = discord.utils.get(ctx.guild.roles, name="Muted")
     if role and role in member.roles:
         await member.remove_roles(role)
-        await ctx.send(f"🔊 **{member}** unmuted.")
+        await ctx.send(f"🌋 **{member}** unmuted.")
 
 @bot.command()
 async def slowmode(ctx, channel: discord.TextChannel = None, seconds: int = 0):
@@ -401,14 +401,14 @@ async def slowmode(ctx, channel: discord.TextChannel = None, seconds: int = 0):
     if not has_mod_perms(ctx, conf): return
     target = channel or ctx.channel
     await target.edit(slowmode_delay=seconds)
-    await ctx.send(f"🐌 Slowmode set to **{seconds}s** in {target.mention}.")
+    await ctx.send(f"🌋 Slowmode set to **{seconds}s** in {target.mention}.")
 
 @bot.command()
 async def purge(ctx, amount: int):
     conf = get_guild_config(ctx.guild.id)
     if not has_mod_perms(ctx, conf): return
     deleted = await ctx.channel.purge(limit=amount + 1)
-    await ctx.send(f"🧹 Deleted **{len(deleted)-1}** messages.", delete_after=3)
+    await ctx.send(f"🌋 Deleted **{len(deleted)-1}** messages.", delete_after=3)
 
 @bot.command()
 async def cases(ctx):
@@ -430,10 +430,10 @@ async def giveaway(ctx, duration: str, *, prize: str):
     e = discord.Embed(title="🎉 GIVEAWAY 🎉", description=f"**Prize:** {prize}\n**Duration:** {duration}\n\nReact with 🎉 to enter!", color=0xffd700)
     e.set_footer(text=f"Hosted by {ctx.author}")
     msg = await ctx.send(embed=e)
-    await msg.add_reaction("🎉")
+    await msg.add_reaction("🌋")
     await asyncio.sleep(seconds)
     msg = await ctx.channel.fetch_message(msg.id)
-    reaction = discord.utils.get(msg.reactions, emoji="🎉")
+    reaction = discord.utils.get(msg.reactions, emoji="🌋")
     users = [u async for u in reaction.users() if not u.bot]
     if not users: await ctx.send("No entries.")
     else:
@@ -445,7 +445,7 @@ class TicketSelect(discord.ui.Select):
     def __init__(self, conf):
         tc = conf['modules']['tickets']
         cats = tc.get('categories', {})
-        cat_order = ['support', 'store', 'apply', 'report', 'bug']
+        cat_order = ['support', 'store', 'apply', 'report','bug', 'beta']
         options = []
         for key in cat_order:
             cat_conf = cats.get(key, {})
@@ -496,8 +496,8 @@ class CloseTicketView(discord.ui.View):
 
 @bot.command()
 async def setticket(ctx):
-    conf = get_guild_config(ctx.guild.id)
-    if conf['modules']['tickets']['enabled'] != "True" or not ctx.author.guild_permissions.administrator: return
+    conf = get_guild_config(ctx.guild.id)ct
+    if conf['modules']['tickets']['enabled'] != "True" or not x.author.guild_permissions.administrator: return
     e = discord.Embed(title="🎫 Support Tickets", description="Select a category below to open a ticket.", color=0xff3333)
     await ctx.send(embed=e, view=TicketView(conf))
     await ctx.message.delete()
@@ -879,8 +879,7 @@ hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
     <hr class="dv">
     <div class="f"><label class="fl">Global Support Role</label><select name="tc_support_role_id"><option value="">— Select Role —</option>{% for r in roles %}<option value="{{ r.id }}" {% if r.id|string==config.modules.tickets.support_role_id %}selected{% endif %}>{{ r.name }}</option>{% endfor %}</select></div>
   </div>
-  {% for key, (def_emoji, def_label) in [('support',('🎫','Support')),('store',('🛒','Store')),('apply',('📋','Apply')),('report',('🚨','User Report')),('bug',('🐛','Bug Report'))] %}
-  {% set cat=config.modules.tickets.categories.get(key,{}) %}
+  {% for key, (def_emoji, def_label) in [('support',('🎫','Support')),('store',('🛒','Store')),('apply',('📋','Apply')),('report',('🚨','User Report')),('bug',('🐛','Bug Report')),('beta',('🌋','Beta Tester'))] %}
   <div class="card">
     <div class="ch" style="margin-bottom:12px;">
       <div style="display:flex;align-items:center;gap:8px;"><span style="font-size:16px;">{{ cat.get('emoji',def_emoji) }}</span><div class="ct" style="margin:0;">{{ def_label }}</div></div>
