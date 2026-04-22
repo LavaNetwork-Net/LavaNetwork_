@@ -879,20 +879,22 @@ hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
     <hr class="dv">
     <div class="f"><label class="fl">Global Support Role</label><select name="tc_support_role_id"><option value="">— Select Role —</option>{% for r in roles %}<option value="{{ r.id }}" {% if r.id|string==config.modules.tickets.support_role_id %}selected{% endif %}>{{ r.name }}</option>{% endfor %}</select></div>
   </div>
+  {% if config and config.modules.tickets %}
   {% for key, (def_emoji, def_label) in [('support',('🎫','Support')),('store',('🛒','Store')),('apply',('📋','Apply')),('report',('🚨','User Report')),('bug',('🐛','Bug Report')),('beta',('🌋','Beta Tester'))] %}
   <div class="card">
     <div class="ch" style="margin-bottom:12px;">
-      <div style="display:flex;align-items:center;gap:8px;"><span style="font-size:16px;">{{ cat.get('emoji',def_emoji) }}</span><div class="ct" style="margin:0;">{{ def_label }}</div></div>
-      <label class="sw"><input type="checkbox" name="tc_{{ key }}_enabled" value="True" {% if cat.get('enabled','True')=="True" %}checked{% endif %}><span class="sl"></span></label>
+      <div style="display:flex;align-items:center;gap:8px;"><span style="font-size:16px;">{{ config.modules.tickets.categories.get(key,{}).get('emoji',def_emoji) }}</span><div class="ct" style="margin:0;">{{ def_label }}</div></div>
+      <label class="sw"><input type="checkbox" name="tc_{{ key }}_enabled" value="True" {% if config.modules.tickets.categories.get(key,{}).get('enabled','True')=="True" %}checked{% endif %}><span class="sl"></span></label>
     </div>
     <div class="g2">
-      <div class="f"><label class="fl">Label</label><input type="text" name="tc_{{ key }}_label" value="{{ cat.get('label',def_label) }}"></div>
-      <div class="f"><label class="fl">Emoji</label><input type="text" name="tc_{{ key }}_emoji" value="{{ cat.get('emoji',def_emoji) }}"></div>
+      <div class="f"><label class="fl">Label</label><input type="text" name="tc_{{ key }}_label" value="{{ config.modules.tickets.categories.get(key,{}).get('label',def_label) }}"></div>
+      <div class="f"><label class="fl">Emoji</label><input type="text" name="tc_{{ key }}_emoji" value="{{ config.modules.tickets.categories.get(key,{}).get('emoji',def_emoji) }}"></div>
     </div>
-    <div class="f"><label class="fl">Description (shown in dropdown)</label><input type="text" name="tc_{{ key }}_desc" value="{{ cat.get('description','') }}"></div>
-    <div class="f"><label class="fl">Discord Category (where tickets open)</label><select name="tc_{{ key }}_category"><option value="">— No Category —</option>{% for c in categories %}<option value="{{ c.id }}" {% if c.id|string==cat.get('category_id','') %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select></div>
+    <div class="f"><label class="fl">Description (shown in dropdown)</label><input type="text" name="tc_{{ key }}_desc" value="{{ config.modules.tickets.categories.get(key,{}).get('description','') }}"></div>
+    <div class="f"><label class="fl">Discord Category (where tickets open)</label><select name="tc_{{ key }}_category"><option value="">— No Category —</option>{% for c in categories %}<option value="{{ c.id }}" {% if c.id|string==config.modules.tickets.categories.get(key,{}).get('category_id','') %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select></div>
   </div>
   {% endfor %}
+  {% endif %}
 </div>
 
 <!-- COUNTING -->
