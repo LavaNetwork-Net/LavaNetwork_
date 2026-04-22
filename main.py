@@ -496,8 +496,8 @@ class CloseTicketView(discord.ui.View):
 
 @bot.command()
 async def setticket(ctx):
-    conf = get_guild_config(ctx.guild.id)ct
-    if conf['modules']['tickets']['enabled'] != "True" or not x.author.guild_permissions.administrator: return
+    conf = get_guild_config(ctx.guild.id)
+    if conf['modules']['tickets']['enabled'] != "True" or not ctx.author.guild_permissions.administrator: return
     e = discord.Embed(title="🎫 Support Tickets", description="Select a category below to open a ticket.", color=0xff3333)
     await ctx.send(embed=e, view=TicketView(conf))
     await ctx.message.delete()
