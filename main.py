@@ -16,6 +16,7 @@ config_col = db['guild_configs']
 warns_col = db['warnings']
 cases_col = db['mod_cases']
 counting_col = db['counting']
+anchor_col = db['anchor_messages']
 
 def get_guild_config(guild_id):
     conf = config_col.find_one({"guild_id": str(guild_id)})
@@ -31,7 +32,8 @@ def get_guild_config(guild_id):
             "timeout_enabled": "False", "timeout_msg": "You were timed out in {server}.",
             "warn_enabled": "False", "warn_msg": "You received a warning in {server}: {reason}",
             "unban_enabled": "False", "unban_msg": "You were unbanned from {server}.",
-            "mute_enabled": "False", "mute_msg": "You were muted in {server}."
+            "mute_enabled": "False", "mute_msg": "You were muted in {server}.",
+            "honeypot_enabled": "False", "honeypot_msg": "You were soft kicked from {server} for typing in a honeypot channel."
         },
         "welcome_channel": {
             "enabled": "False", "channel_id": "", "message": "Welcome {user} to {server}!",
@@ -77,6 +79,8 @@ def get_guild_config(guild_id):
             }
         },
         "counting": {"enabled": "False", "channel_id": ""},
+        "anchor": {"enabled": "False", "channel_id": "", "message": "Your anchored message here."},
+        "support_waiting_room": {"enabled": "False", "voice_channel_id": "", "notify_channel_id": "", "roles": [], "message": "{user} joined {channel} and needs support!"},
         "honeypot": {"enabled": "False", "channel_id": ""},
         "status": {"type": "playing", "text": "Lava Network"}
     }
@@ -231,6 +235,29 @@ async def on_member_update(before, after):
         if removed: await log_action(before.guild, conf, f"🎭 **{before}** lost **{removed[0].name}**", 0xff6666)
 
 @bot.event
+async def on_voice_state_update(member, before, after):
+    if member.bot or not member.guild: return
+    conf = get_guild_config(member.guild.id)
+    wr = conf['modules'].get('support_waiting_room', {})
+    if wr.get('enabled') != "True": return
+    if not after.channel or (before.channel and before.channel.id == after.channel.id): return
+    vc_id = wr.get('voice_channel_id')
+    if vc_id and vc_id != "" and str(after.channel.id) != vc_id: return
+    notify = wr.get('notify_channel_id')
+    if not notify: return
+    ch = member.guild.get_channel(int(notify)) if notify.isdigit() else None
+    if not ch: return
+    mentions = []
+    for rid in wr.get('roles', []):
+        if rid and rid.isdigit():
+            role = member.guild.get_role(int(rid))
+            if role: mentions.append(role.mention)
+    if not mentions: return
+    msg = wr.get('message', '{user} joined {channel} and needs support!')
+    msg = msg.replace('{user}', member.mention).replace('{channel}', after.channel.name)
+    await ch.send(f"{' '.join(mentions)} {msg}")
+
+@bot.event
 async def on_message(message):
     if message.author == bot.user or not message.guild: return
     conf = get_guild_config(message.guild.id)
@@ -278,9 +305,11 @@ async def on_message(message):
     if hp.get('enabled') == "True" and hp.get('channel_id') and str(message.channel.id) == hp['channel_id']:
         if not message.author.bot and not message.author.guild_permissions.administrator:
             await message.delete()
-            try:
-                await message.author.send(f"You were soft kicked from {message.guild.name} for typing in a honeypot channel.")
-            except: pass
+            dmc = conf['modules'].get('dms', {})
+            if dmc.get('honeypot_enabled') == "True":
+                try:
+                    await send_user_dm(message.author, dmc.get('honeypot_msg', "You were soft kicked from {server} for typing in a honeypot channel."), message.guild.name)
+                except: pass
             emoji = conf['modules'].get('message_emojis', {}).get('honeypot', '🚨')
             await message.channel.send(f"{message.author.mention} {emoji} You have been soft kicked for sending a message in this honeypot channel.", delete_after=8)
             await message.author.kick(reason="Honeypot channel violation")
@@ -315,6 +344,18 @@ async def on_message(message):
                 emoji = conf['modules'].get('message_emojis', {}).get('auto_mod_spam', '⌛')
                 await message.channel.send(f"{message.author.mention} {emoji} slow down!", delete_after=5)
                 spam_tracker[key] = []; return
+
+    # ANCHORED MESSAGE
+    anc = conf['modules'].get('anchor', {})
+    if anc.get('enabled') == "True" and anc.get('channel_id') and str(message.channel.id) == anc['channel_id']:
+        old = anchor_col.find_one({"guild_id": str(message.guild.id), "channel_id": anc['channel_id']})
+        if old and old.get('message_id'):
+            try:
+                old_msg = await message.channel.fetch_message(int(old['message_id']))
+                await old_msg.delete()
+            except: pass
+        new_msg = await message.channel.send(anc.get('message', "Your anchored message here."))
+        anchor_col.update_one({"guild_id": str(message.guild.id), "channel_id": anc['channel_id']}, {"$set": {"message_id": str(new_msg.id)}}, upsert=True)
 
     # HELP / INFO
     for mod in ['help', 'info']:
@@ -781,6 +822,8 @@ hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
       <button class="nb" onclick="sp('welcome',this)"><i class="fas fa-door-open"></i>Welcome / Leave</button>
       <button class="nb" onclick="sp('automod',this)"><i class="fas fa-shield-alt"></i>Auto-Mod</button>
       <button class="nb" onclick="sp('linkfilter',this)"><i class="fas fa-link"></i>Link Filter</button>
+      <button class="nb" onclick="sp('anchor',this)"><i class="fas fa-anchor"></i>Anchored Message</button>
+      <button class="nb" onclick="sp('waitingroom',this)"><i class="fas fa-door-closed"></i>Waiting Room</button>
       <button class="nb" onclick="sp('mod',this)"><i class="fas fa-gavel"></i>Moderation</button>
       <button class="nb" onclick="sp('warnsys',this)"><i class="fas fa-exclamation-triangle"></i>Warn System</button>
       <button class="nb" onclick="sp('tickets',this)"><i class="fas fa-ticket-alt"></i>Tickets</button>
@@ -822,7 +865,7 @@ hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
   </div>
   <div class="card">
     <div class="ct" style="margin-bottom:10px;">Modules</div>
-    {% set mods=[('link_filter','Link Filter','fa-link'),('mod','Moderation','fa-gavel'),('auto_mod','Auto-Mod','fa-shield-alt'),('logging','Logging','fa-list-alt'),('welcome_channel','Welcome','fa-door-open'),('tickets','Tickets','fa-ticket-alt'),('counting','Counting','fa-sort-numeric-up'),('giveaway','Giveaway','fa-gift')] %}
+    {% set mods=[('link_filter','Link Filter','fa-link'),('mod','Moderation','fa-gavel'),('auto_mod','Auto-Mod','fa-shield-alt'),('honeypot','Honeypot','fa-bug'),('logging','Logging','fa-list-alt'),('welcome_channel','Welcome','fa-door-open'),('tickets','Tickets','fa-ticket-alt'),('counting','Counting','fa-sort-numeric-up'),('giveaway','Giveaway','fa-gift')] %}
     {% for k,lbl,ic in mods %}
     <div class="mr">
       <div class="mr-l"><div class="mr-ic"><i class="fas {{ ic }}"></i></div><div class="mr-name">{{ lbl }}</div></div>
@@ -909,6 +952,37 @@ hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
     <hr class="dv">
     <div class="f"><label class="fl">Protected Channels</label><div class="sl-box">{% for c in channels %}<div class="ci"><input type="checkbox" name="lf_chans" value="{{ c.id }}" {% if c.id|string in config.modules.link_filter.chans %}checked{% endif %}>#{{ c.name }}</div>{% endfor %}</div></div>
     <div class="f"><label class="fl">Bypass Roles</label><div class="sl-box">{% for r in roles %}<div class="ci"><input type="checkbox" name="lf_roles" value="{{ r.id }}" {% if r.id|string in config.modules.link_filter.roles %}checked{% endif %}>{{ r.name }}</div>{% endfor %}</div></div>
+  </div>
+</div>
+
+<!-- ANCHORED MESSAGE -->
+<div id="anchor" class="page">
+  <div class="ph"><div class="pt">Anchored Message</div><div class="ps">Keep one anchored message below the latest chat message in one channel.</div></div>
+  <div class="card">
+    <div class="tr"><div class="ti"><div class="tl">Enable Anchor</div><div class="ts">Reposts the anchored text after each new message.</div></div><label class="sw"><input type="checkbox" name="an_enabled" value="True" {% if config.modules.anchor.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <div class="f"><label class="fl">Channel</label><select name="an_channel_id"><option value="">— Select Channel —</option>{% for c in channels %}<option value="{{ c.id }}" {% if c.id|string==config.modules.anchor.channel_id %}selected{% endif %}>#{{ c.name }}</option>{% endfor %}</select></div>
+    <div class="f"><label class="fl">Anchored Message</label><textarea name="an_message">{{ config.modules.anchor.message }}</textarea></div>
+  </div>
+</div>
+
+<!-- SUPPORT WAITING ROOM -->
+<div id="waitingroom" class="page">
+  <div class="ph"><div class="pt">Support Waiting Room</div><div class="ps">Ping selected roles when someone joins the chosen voice channel.</div></div>
+  <div class="card">
+    <div class="tr"><div class="ti"><div class="tl">Enable Waiting Room</div></div><label class="sw"><input type="checkbox" name="wr_enabled" value="True" {% if config.modules.support_waiting_room.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <div class="f"><label class="fl">Voice Channel</label><select name="wr_voice_channel_id"><option value="">— Any Voice Channel —</option>{% for c in voice_channels %}<option value="{{ c.id }}" {% if c.id|string==config.modules.support_waiting_room.voice_channel_id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select></div>
+    <div class="f"><label class="fl">Notify Channel</label><select name="wr_notify_channel_id"><option value="">— Select Channel —</option>{% for c in channels %}<option value="{{ c.id }}" {% if c.id|string==config.modules.support_waiting_room.notify_channel_id %}selected{% endif %}>#{{ c.name }}</option>{% endfor %}</select></div>
+    <div class="f"><label class="fl">Roles to Ping</label><div class="sl-box">{% for r in roles %}<div class="ci"><input type="checkbox" name="wr_roles" value="{{ r.id }}" {% if r.id|string in config.modules.support_waiting_room.roles %}checked{% endif %}>{{ r.name }}</div>{% endfor %}</div></div>
+    <div class="f"><label class="fl">Notification Message — use {user} {channel}</label><textarea name="wr_message">{{ config.modules.support_waiting_room.message }}</textarea></div>
+  </div>
+</div>
+
+<!-- HONEYPOT -->
+<div id="honeypot" class="page">
+  <div class="ph"><div class="pt">Honeypot</div><div class="ps">Soft kick anyone who sends a message in the honeypot channel.</div></div>
+  <div class="card">
+    <div class="tr"><div class="ti"><div class="tl">Enable Honeypot</div></div><label class="sw"><input type="checkbox" name="hp_enabled" value="True" {% if config.modules.honeypot.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
+    <div class="f"><label class="fl">Channel</label><select name="hp_channel_id"><option value="">— Select —</option>{% for c in channels %}<option value="{{ c.id }}" {% if c.id|string==config.modules.honeypot.channel_id %}selected{% endif %}>#{{ c.name }}</option>{% endfor %}</select></div>
   </div>
 </div>
 
@@ -1033,7 +1107,7 @@ hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 <!-- DM NOTIFICATIONS -->
 <div id="dms" class="page">
   <div class="ph"><div class="pt">DM Notifications</div><div class="ps">Placeholders: <span class="code">{server}</span> <span class="code">{reason}</span></div></div>
-  {% for pfx,key,lbl in [('dm_w','welcome','Welcome'),('dm_k','kick','Kick'),('dm_b','ban','Ban'),('dm_t','timeout','Timeout'),('dm_warn','warn','Warning'),('dm_ub','unban','Unban'),('dm_m','mute','Mute')] %}
+  {% for pfx,key,lbl in [('dm_w','welcome','Welcome'),('dm_k','kick','Kick'),('dm_b','ban','Ban'),('dm_t','timeout','Timeout'),('dm_warn','warn','Warning'),('dm_ub','unban','Unban'),('dm_m','mute','Mute'),('dm_hp','honeypot','Honeypot')] %}
   <div class="card">
     <div class="ch" style="margin-bottom:11px;"><div class="ct" style="margin:0;">{{ lbl }} DM</div><label class="sw"><input type="checkbox" name="{{ pfx }}_enabled" value="True" {% if config.modules.dms[key+'_enabled']=="True" %}checked{% endif %}><span class="sl"></span></label></div>
     <div class="f"><label class="fl">Message</label><textarea name="{{ pfx }}_msg">{{ config.modules.dms[key+'_msg'] }}</textarea></div>
@@ -1173,6 +1247,9 @@ def index():
                 "modules.leave_channel.enabled": cb(request.form.get("lc_enabled")), "modules.leave_channel.channel_id": request.form.get("lc_channel_id",""),
                 "modules.leave_channel.message": request.form.get("lc_message"),
                 "modules.link_filter.enabled": cb(request.form.get("lf_enabled")), "modules.link_filter.chans": request.form.getlist("lf_chans"), "modules.link_filter.roles": request.form.getlist("lf_roles"),
+                "modules.anchor.enabled": cb(request.form.get("an_enabled")), "modules.anchor.channel_id": request.form.get("an_channel_id",""), "modules.anchor.message": request.form.get("an_message",""),
+                "modules.support_waiting_room.enabled": cb(request.form.get("wr_enabled")), "modules.support_waiting_room.voice_channel_id": request.form.get("wr_voice_channel_id",""), "modules.support_waiting_room.notify_channel_id": request.form.get("wr_notify_channel_id",""),
+                "modules.support_waiting_room.roles": request.form.getlist("wr_roles"), "modules.support_waiting_room.message": request.form.get("wr_message","{user} joined {channel} and needs support!"),
                 "modules.auto_mod.enabled": cb(request.form.get("am_enabled")), "modules.auto_mod.blacklist": request.form.getlist("am_blacklist"),
                 "modules.auto_mod.blacklist_action": request.form.get("am_blacklist_action"), "modules.auto_mod.caps_filter": cb(request.form.get("am_caps_filter")),
                 "modules.auto_mod.caps_threshold": request.form.get("am_caps_threshold"), "modules.auto_mod.spam_filter": cb(request.form.get("am_spam_filter")),
@@ -1189,6 +1266,8 @@ def index():
                 "modules.message_emojis.counting_fail": request.form.get("me_counting_fail","❌"), "modules.message_emojis.counting_success": request.form.get("me_counting_success","✅"),
                 "modules.message_emojis.honeypot": request.form.get("me_honeypot","🚨"), "modules.message_emojis.mod_action": request.form.get("me_mod_action","🌋"),
                 "modules.message_emojis.help_info": request.form.get("me_help_info","ℹ️"),
+                "modules.honeypot.enabled": cb(request.form.get("hp_enabled")), "modules.honeypot.channel_id": request.form.get("hp_channel_id",""),
+                "modules.dms.honeypot_enabled": cb(request.form.get("dm_hp_enabled")), "modules.dms.honeypot_msg": request.form.get("dm_hp_msg","You were soft kicked from {server} for typing in a honeypot channel."),
                 "modules.auto_role.enabled": cb(request.form.get("ar_enabled")), "modules.auto_role.role_id": request.form.get("ar_role_id",""),
                 "modules.counting.enabled": cb(request.form.get("count_enabled")), "modules.counting.channel_id": request.form.get("count_channel_id",""),
                 "modules.giveaway.enabled": cb(request.form.get("ga_enabled")),
@@ -1226,6 +1305,7 @@ def index():
             guild_name = g.name; member_count = g.member_count
             roles = [{"id": r.id,"name": r.name} for r in g.roles if not r.managed and r.name!="@everyone"]
             channels = [{"id": c.id,"name": c.name} for c in g.text_channels]
+            voice_channels = [{"id": c.id,"name": c.name} for c in g.voice_channels]
             categories = [{"id": c.id,"name": c.name} for c in g.categories]
         total_warns = warns_col.count_documents({"guild_id": session['guild_id']})
         total_cases = cases_col.count_documents({"guild_id": session['guild_id']})
@@ -1233,7 +1313,7 @@ def index():
         cd = counting_col.find_one({"guild_id": session['guild_id']})
         current_count = cd.get('count',0) if cd else 0
 
-    return render_template_string(HTML, config=conf, guilds=guilds, roles=roles or [], channels=channels or [],
+    return render_template_string(HTML, config=conf, guilds=guilds, roles=roles or [], channels=channels or [], voice_channels=voice_channels or [],
         categories=categories or [], guild_name=guild_name, bot_name=bot_name, accent_color=accent_color,
         member_count=member_count, total_warns=total_warns, total_cases=total_cases,
         mod_cases=mod_cases, current_count=current_count, login_error=login_error)
