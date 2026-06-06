@@ -52,6 +52,17 @@ def get_guild_config(guild_id):
         },
         "auto_role": {"enabled": "False", "role_id": ""},
         "warn_system": {"enabled": "False", "warn_threshold_kick": "0", "warn_threshold_ban": "0"},
+        "message_emojis": {
+            "link_filter": "🚫",
+            "auto_mod_blacklist": "⚠️",
+            "auto_mod_caps": "⚠️",
+            "auto_mod_spam": "⌛",
+            "counting_fail": "❌",
+            "counting_success": "✅",
+            "honeypot": "🚨",
+            "mod_action": "🌋",
+            "help_info": "ℹ️"
+        },
         "giveaway": {"enabled": "False"},
         "tickets": {
             "enabled": "False",
@@ -66,6 +77,7 @@ def get_guild_config(guild_id):
             }
         },
         "counting": {"enabled": "False", "channel_id": ""},
+        "honeypot": {"enabled": "False", "channel_id": ""},
         "status": {"type": "playing", "text": "Lava Network"}
     }
 
@@ -231,7 +243,8 @@ async def on_message(message):
         try: number = int(message.content.strip())
         except:
             await message.add_reaction("❌")
-            await message.channel.send(f"{message.author.mention} Only numbers! Count resets to **0**.", delete_after=5)
+            emoji = conf['modules'].get('message_emojis', {}).get('counting_fail', '❌')
+            await message.channel.send(f"{message.author.mention} {emoji} Only numbers! Count resets to **0**.", delete_after=5)
             counting_col.update_one({"guild_id": str(message.guild.id)}, {"$set": {"count": 0, "last_user": None}}, upsert=True)
             return
         expected = state.get('count', 0) + 1
@@ -239,10 +252,13 @@ async def on_message(message):
         if number != expected or str(message.author.id) == last_user:
             await message.add_reaction("❌")
             reason = "Wrong number!" if number != expected else "You can't count twice in a row!"
-            await message.channel.send(f"{message.author.mention} ❌ {reason} Next: **1**.", delete_after=6)
+            emoji = conf['modules'].get('message_emojis', {}).get('counting_fail', '❌')
+            await message.channel.send(f"{message.author.mention} {emoji} {reason} Next: **1**.", delete_after=6)
             counting_col.update_one({"guild_id": str(message.guild.id)}, {"$set": {"count": 0, "last_user": None}}, upsert=True)
         else:
             await message.add_reaction("✅")
+            emoji = conf['modules'].get('message_emojis', {}).get('counting_success', '✅')
+            await message.channel.send(f"{message.author.mention} {emoji} Nice! Count is now **{number}**.", delete_after=5)
             counting_col.update_one({"guild_id": str(message.guild.id)}, {"$set": {"count": number, "last_user": str(message.author.id)}}, upsert=True)
         return
 
@@ -253,8 +269,22 @@ async def on_message(message):
         bypass = any(rid in lf.get('roles', []) for rid in user_roles) or message.author.guild_permissions.administrator
         if not bypass and re.search(r'http[s]?://', message.content.lower()):
             await message.delete()
-            await message.channel.send(f"{message.author.mention} links not allowed here.", delete_after=5)
+            emoji = conf['modules'].get('message_emojis', {}).get('link_filter', '🚫')
+            await message.channel.send(f"{message.author.mention} {emoji} links not allowed here.", delete_after=5)
             return
+
+    # HONEYPOT
+    hp = conf['modules'].get('honeypot', {})
+    if hp.get('enabled') == "True" and hp.get('channel_id') and str(message.channel.id) == hp['channel_id']:
+        if not message.author.bot and not message.author.guild_permissions.administrator:
+            await message.delete()
+            try:
+                await message.author.send(f"You were soft kicked from {message.guild.name} for typing in a honeypot channel.")
+            except: pass
+            emoji = conf['modules'].get('message_emojis', {}).get('honeypot', '🚨')
+            await message.channel.send(f"{message.author.mention} {emoji} You have been soft kicked for sending a message in this honeypot channel.", delete_after=8)
+            await message.author.kick(reason="Honeypot channel violation")
+        return
 
     # AUTO-MOD
     am = conf['modules'].get('auto_mod', {})
@@ -264,13 +294,15 @@ async def on_message(message):
             if word.lower() in cl:
                 await message.delete()
                 if am.get('blacklist_action') == 'warn': await _add_warn(message.guild, message.author, bot.user, "Auto-Mod: Blacklisted word", conf)
-                await message.channel.send(f"{message.author.mention} message removed.", delete_after=5)
+                emoji = conf['modules'].get('message_emojis', {}).get('auto_mod_blacklist', '⚠️')
+                await message.channel.send(f"{message.author.mention} {emoji} message removed.", delete_after=5)
                 return
         if am.get('caps_filter') == "True" and len(message.content) > 10:
             caps = sum(1 for c in message.content if c.isupper())
             if caps / len(message.content) * 100 >= int(am.get('caps_threshold', 70)):
                 await message.delete()
-                await message.channel.send(f"{message.author.mention} too many caps.", delete_after=5)
+                emoji = conf['modules'].get('message_emojis', {}).get('auto_mod_caps', '⚠️')
+                await message.channel.send(f"{message.author.mention} {emoji} too many caps.", delete_after=5)
                 return
         if am.get('spam_filter') == "True":
             key = f"{message.guild.id}:{message.author.id}"; now = datetime.utcnow().timestamp()
@@ -280,7 +312,8 @@ async def on_message(message):
             spam_tracker[key].append(now)
             if len(spam_tracker[key]) >= sc:
                 await message.delete()
-                await message.channel.send(f"{message.author.mention} slow down!", delete_after=5)
+                emoji = conf['modules'].get('message_emojis', {}).get('auto_mod_spam', '⌛')
+                await message.channel.send(f"{message.author.mention} {emoji} slow down!", delete_after=5)
                 spam_tracker[key] = []; return
 
     # HELP / INFO
@@ -289,7 +322,8 @@ async def on_message(message):
         if md['enabled'] == "True":
             aliases = [a.strip().lower() for a in md.get("aliases", mod).split(",")]
             if any(message.content.lower() == f"{prefix}{a}" for a in aliases):
-                await message.channel.send(md.get("text")); return
+                emoji = conf['modules'].get('message_emojis', {}).get('help_info', 'ℹ️')
+                await message.channel.send(f"{emoji} {md.get('text')}"); return
 
     await bot.process_commands(message)
 
@@ -301,6 +335,27 @@ async def setcounting(ctx):
     counting_col.update_one({"guild_id": str(ctx.guild.id)}, {"$set": {"count": 0, "last_user": None}}, upsert=True)
     await ctx.send(f"✅ Counting set to {ctx.channel.mention}! Start with **1**.")
 
+@bot.command()
+async def honeypot(ctx, arg: str = None):
+    conf = get_guild_config(ctx.guild.id)
+    if not has_mod_perms(ctx, conf): return
+    if arg and arg.lower() in ["off", "disable", "remove"]:
+        hp = conf['modules'].get('honeypot', {})
+        if hp.get('enabled') == "True" and hp.get('channel_id') == str(ctx.channel.id):
+            config_col.update_one({"guild_id": str(ctx.guild.id)}, {"$set": {"modules.honeypot.enabled": "False", "modules.honeypot.channel_id": ""}})
+            await ctx.send("✅ Honeypot disabled for this channel.")
+        else:
+            await ctx.send("Honeypot is not enabled in this channel.")
+        return
+
+    config_col.update_one({"guild_id": str(ctx.guild.id)}, {"$set": {"modules.honeypot.enabled": "True", "modules.honeypot.channel_id": str(ctx.channel.id)}})
+    embed = discord.Embed(
+        title="HONEYPOT ENABLED",
+        description="This channel is now a honeypot. Anyone who sends a message here will be softly kicked. Do not type here unless you want to be removed.",
+        color=0x00ffff
+    )
+    await ctx.send(embed=embed)
+
 # --- MOD COMMANDS ---
 @bot.command()
 async def warn(ctx, member: discord.Member, *, reason=None):
@@ -308,9 +363,10 @@ async def warn(ctx, member: discord.Member, *, reason=None):
     if conf['modules']['mod']['enabled'] != "True" or not has_mod_perms(ctx, conf): return
     total = await _add_warn(ctx.guild, member, ctx.author, reason or "No reason", conf)
     case = await add_mod_case(ctx.guild.id, "WARN", ctx.author, member, reason)
-    await ctx.send(f"⚠️ **{member}** warned · {total} total · Case #{case}")
+    emoji = conf['modules'].get('message_emojis', {}).get('mod_action', '🌋')
+    await ctx.send(f"{emoji} **{member}** warned · {total} total · Case #{case}")
     if conf['modules'].get('logging', {}).get('log_mods') == "True":
-        await log_action(ctx.guild, conf, f"⚠️ **{member}** warned by **{ctx.author}**\nReason: {reason}", 0xffcc00)
+        await log_action(ctx.guild, conf, f"{emoji} **{member}** warned by **{ctx.author}**\nReason: {reason}", 0xffcc00)
 
 @bot.command()
 async def warns(ctx, member: discord.Member):
@@ -335,9 +391,10 @@ async def kick(ctx, member: discord.Member, *, reason=None):
     if dmc.get("kick_enabled") == "True": await send_user_dm(member, dmc["kick_msg"], ctx.guild.name)
     await member.kick(reason=reason)
     case = await add_mod_case(ctx.guild.id, "KICK", ctx.author, member, reason)
-    await ctx.send(f"🌋 **{member}** kicked. Case #{case}")
+    emoji = conf['modules'].get('message_emojis', {}).get('mod_action', '🌋')
+    await ctx.send(f"{emoji} **{member}** kicked. Case #{case}")
     if conf['modules'].get('logging', {}).get('log_mods') == "True":
-        await log_action(ctx.guild, conf, f"🌋 **{member}** kicked by **{ctx.author}**\nReason: {reason}", 0xff6600)
+        await log_action(ctx.guild, conf, f"{emoji} **{member}** kicked by **{ctx.author}**\nReason: {reason}", 0xff6600)
 
 @bot.command()
 async def ban(ctx, member: discord.Member, *, reason=None):
@@ -347,9 +404,10 @@ async def ban(ctx, member: discord.Member, *, reason=None):
     if dmc.get("ban_enabled") == "True": await send_user_dm(member, dmc["ban_msg"], ctx.guild.name)
     await member.ban(reason=reason)
     case = await add_mod_case(ctx.guild.id, "BAN", ctx.author, member, reason)
-    await ctx.send(f"🌋 **{member}** banned. Case #{case}")
+    emoji = conf['modules'].get('message_emojis', {}).get('mod_action', '🌋')
+    await ctx.send(f"{emoji} **{member}** banned. Case #{case}")
     if conf['modules'].get('logging', {}).get('log_mods') == "True":
-        await log_action(ctx.guild, conf, f"🌋 **{member}** banned by **{ctx.author}**\nReason: {reason}", 0xff0000)
+        await log_action(ctx.guild, conf, f"{emoji} **{member}** banned by **{ctx.author}**\nReason: {reason}", 0xff0000)
 
 @bot.command()
 async def unban(ctx, user_id: int, *, reason=None):
@@ -360,8 +418,10 @@ async def unban(ctx, user_id: int, *, reason=None):
         await ctx.guild.unban(user, reason=reason)
         dmc = conf['modules']['dms']
         if dmc.get("unban_enabled") == "True": await send_user_dm(user, dmc["unban_msg"], ctx.guild.name)
-        await ctx.send(f"✅ **{user}** unbanned.")
-    except Exception as e: await ctx.send(f"Error: {e}")
+        emoji = conf['modules'].get('message_emojis', {}).get('mod_action', '🌋')
+        await ctx.send(f"{emoji} **{user}** unbanned.")
+    except Exception as e:
+        await ctx.send(f"Error: {e}")
 
 @bot.command()
 async def timeout(ctx, member: discord.Member, minutes: int, *, reason=None):
@@ -371,7 +431,8 @@ async def timeout(ctx, member: discord.Member, minutes: int, *, reason=None):
     if dmc.get("timeout_enabled") == "True": await send_user_dm(member, dmc["timeout_msg"], ctx.guild.name)
     await member.timeout(timedelta(minutes=minutes), reason=reason)
     case = await add_mod_case(ctx.guild.id, f"TIMEOUT {minutes}m", ctx.author, member, reason)
-    await ctx.send(f"🌋 **{member}** timed out {minutes}m. Case #{case}")
+    emoji = conf['modules'].get('message_emojis', {}).get('mod_action', '🌋')
+    await ctx.send(f"{emoji} **{member}** timed out {minutes}m. Case #{case}")
 
 @bot.command()
 async def mute(ctx, member: discord.Member, *, reason=None):
@@ -386,14 +447,16 @@ async def mute(ctx, member: discord.Member, *, reason=None):
     await member.add_roles(role, reason=reason)
     dmc = conf['modules']['dms']
     if dmc.get("mute_enabled") == "True": await send_user_dm(member, dmc["mute_msg"], ctx.guild.name)
-    await ctx.send(f"🌋 **{member}** muted.")
+    emoji = conf['modules'].get('message_emojis', {}).get('mod_action', '🌋')
+    await ctx.send(f"{emoji} **{member}** muted.")
 
 @bot.command()
 async def unmute(ctx, member: discord.Member):
     role = discord.utils.get(ctx.guild.roles, name="Muted")
     if role and role in member.roles:
         await member.remove_roles(role)
-        await ctx.send(f"🌋 **{member}** unmuted.")
+        emoji = conf['modules'].get('message_emojis', {}).get('mod_action', '🌋')
+    await ctx.send(f"{emoji} **{member}** unmuted.")
 
 @bot.command()
 async def slowmode(ctx, channel: discord.TextChannel = None, seconds: int = 0):
@@ -403,7 +466,7 @@ async def slowmode(ctx, channel: discord.TextChannel = None, seconds: int = 0):
     await target.edit(slowmode_delay=seconds)
     await ctx.send(f"🌋 Slowmode set to **{seconds}s** in {target.mention}.")
 
-@bot.command()
+@bot.command(aliases=["clear"])
 async def purge(ctx, amount: int):
     conf = get_guild_config(ctx.guild.id)
     if not has_mod_perms(ctx, conf): return
@@ -730,6 +793,7 @@ hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
       <span class="sb-section-lbl">Content</span>
       <button class="nb" onclick="sp('dms',this)"><i class="fas fa-envelope"></i>DM Notifications</button>
       <button class="nb" onclick="sp('helpinfo',this)"><i class="fas fa-question-circle"></i>Help / Info</button>
+      <button class="nb" onclick="sp('emojis',this)"><i class="fas fa-smile"></i>Emojis</button>
       <button class="nb" onclick="sp('fonts',this)"><i class="fas fa-font"></i>Font Creator</button>
     </div>
     <div class="sb-section">
@@ -850,7 +914,7 @@ hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 
 <!-- MODERATION -->
 <div id="mod" class="page">
-  <div class="ph"><div class="pt">Moderation</div><div class="ps">Commands: kick, ban, warn, mute, timeout, purge, slowmode.</div></div>
+  <div class="ph"><div class="pt">Moderation</div><div class="ps">Commands: kick, ban, warn, mute, timeout, purge, clear, slowmode.</div></div>
   <div class="card">
     <div class="tr"><div class="ti"><div class="tl">Enable Mod Commands</div></div><label class="sw"><input type="checkbox" name="m_enabled" value="True" {% if config.modules.mod.enabled=="True" %}checked{% endif %}><span class="sl"></span></label></div>
     <hr class="dv">
@@ -867,6 +931,25 @@ hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
     <div class="g2" style="margin-top:12px;">
       <div class="f"><label class="fl">Warns → Auto Kick (0 = off)</label><input type="number" name="ws_kick" value="{{ config.modules.warn_system.warn_threshold_kick }}" min="0"></div>
       <div class="f"><label class="fl">Warns → Auto Ban (0 = off)</label><input type="number" name="ws_ban" value="{{ config.modules.warn_system.warn_threshold_ban }}" min="0"></div>
+    </div>
+  </div>
+</div>
+
+<!-- EMOJIS -->
+<div id="emojis" class="page">
+  <div class="ph"><div class="pt">Emojis</div><div class="ps">Choose which emoji the bot sends with each type of message.</div></div>
+  <div class="card">
+    <div class="ct">Message Emoji Settings</div>
+    <div class="g2">
+      <div class="f"><label class="fl">Link Filter Emoji</label><input type="text" name="me_link_filter" value="{{ config.modules.message_emojis.link_filter }}"></div>
+      <div class="f"><label class="fl">Auto-Mod Blacklist Emoji</label><input type="text" name="me_auto_mod_blacklist" value="{{ config.modules.message_emojis.auto_mod_blacklist }}"></div>
+      <div class="f"><label class="fl">Auto-Mod Caps Emoji</label><input type="text" name="me_auto_mod_caps" value="{{ config.modules.message_emojis.auto_mod_caps }}"></div>
+      <div class="f"><label class="fl">Auto-Mod Spam Emoji</label><input type="text" name="me_auto_mod_spam" value="{{ config.modules.message_emojis.auto_mod_spam }}"></div>
+      <div class="f"><label class="fl">Counting Fail Emoji</label><input type="text" name="me_counting_fail" value="{{ config.modules.message_emojis.counting_fail }}"></div>
+      <div class="f"><label class="fl">Counting Success Emoji</label><input type="text" name="me_counting_success" value="{{ config.modules.message_emojis.counting_success }}"></div>
+      <div class="f"><label class="fl">Honeypot Emoji</label><input type="text" name="me_honeypot" value="{{ config.modules.message_emojis.honeypot }}"></div>
+      <div class="f"><label class="fl">Mod Action Emoji</label><input type="text" name="me_mod_action" value="{{ config.modules.message_emojis.mod_action }}"></div>
+      <div class="f"><label class="fl">Help / Info Emoji</label><input type="text" name="me_help_info" value="{{ config.modules.message_emojis.help_info }}"></div>
     </div>
   </div>
 </div>
@@ -1101,6 +1184,11 @@ def index():
                 "modules.logging.log_joins": cb(request.form.get("log_joins")), "modules.logging.log_leaves": cb(request.form.get("log_leaves")),
                 "modules.logging.log_bans": cb(request.form.get("log_bans")), "modules.logging.log_roles": cb(request.form.get("log_roles")), "modules.logging.log_mods": cb(request.form.get("log_mods")),
                 "modules.tickets.enabled": cb(request.form.get("tc_enabled")), "modules.tickets.support_role_id": request.form.get("tc_support_role_id",""),
+                "modules.message_emojis.link_filter": request.form.get("me_link_filter","🚫"), "modules.message_emojis.auto_mod_blacklist": request.form.get("me_auto_mod_blacklist","⚠️"),
+                "modules.message_emojis.auto_mod_caps": request.form.get("me_auto_mod_caps","⚠️"), "modules.message_emojis.auto_mod_spam": request.form.get("me_auto_mod_spam","⌛"),
+                "modules.message_emojis.counting_fail": request.form.get("me_counting_fail","❌"), "modules.message_emojis.counting_success": request.form.get("me_counting_success","✅"),
+                "modules.message_emojis.honeypot": request.form.get("me_honeypot","🚨"), "modules.message_emojis.mod_action": request.form.get("me_mod_action","🌋"),
+                "modules.message_emojis.help_info": request.form.get("me_help_info","ℹ️"),
                 "modules.auto_role.enabled": cb(request.form.get("ar_enabled")), "modules.auto_role.role_id": request.form.get("ar_role_id",""),
                 "modules.counting.enabled": cb(request.form.get("count_enabled")), "modules.counting.channel_id": request.form.get("count_channel_id",""),
                 "modules.giveaway.enabled": cb(request.form.get("ga_enabled")),
