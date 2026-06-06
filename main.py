@@ -1291,7 +1291,7 @@ def index():
             return redirect("/")
 
     guilds = [{"name": g.name, "id": str(g.id)} for g in bot.guilds]
-    conf = roles = channels = categories = None
+    conf = roles = channels = categories = voice_channels = None
     guild_name = ""; member_count = total_warns = total_cases = current_count = 0
     mod_cases = []; bot_name = "LAVA"; accent_color = "#ff3333"
 
