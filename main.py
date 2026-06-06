@@ -847,6 +847,8 @@ hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
   <div class="sb-foot">
     <button class="nb" onclick="location.href='/change_server'"><i class="fas fa-exchange-alt"></i>Switch Server</button>
     <a class="nb" href="/logout"><i class="fas fa-sign-out-alt"></i>Logout</a>
+  </div>
+</div>
 
 <div class="main">
 <div class="inner">
