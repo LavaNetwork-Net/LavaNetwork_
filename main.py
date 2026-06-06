@@ -846,9 +846,7 @@ hr.dv { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
   </div>
   <div class="sb-foot">
     <button class="nb" onclick="location.href='/change_server'"><i class="fas fa-exchange-alt"></i>Switch Server</button>
-    <button class="nb" onclick="location.href='/logout'"><i class="fas fa-sign-out-alt"></i>Logout</button>
-  </div>
-</div>
+    <a class="nb" href="/logout"><i class="fas fa-sign-out-alt"></i>Logout</a>
 
 <div class="main">
 <div class="inner">
@@ -1325,7 +1323,10 @@ def select_guild(guild_id): session['guild_id']=guild_id; return redirect("/")
 def change_server(): session.pop('guild_id',None); return redirect("/")
 
 @app.route("/logout")
-def logout(): session.clear(); return redirect("/")
+def logout():
+    session.pop('guild_id', None)
+    session.pop('user', None)
+    return redirect("/")
 
 def run(): app.run(host="0.0.0.0", port=10000)
 threading.Thread(target=run).start()
